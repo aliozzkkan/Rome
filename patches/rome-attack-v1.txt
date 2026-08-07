@@ -1,0 +1,197 @@
+
+  // --- Dedicated Rome attack affordance for touch/iPad ---
+  const romeAttackStyle = document.createElement('style');
+  romeAttackStyle.textContent = `
+    #romeAttackHint {
+      position: fixed;
+      z-index: 150;
+      top: 68px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 13px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,106,106,.65);
+      background: rgba(69,16,20,.92);
+      color: #ffe7e7;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      box-shadow: 0 10px 28px rgba(0,0,0,.35);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    #romeAttackHint.show { display:flex; }
+    #romeAttackHint button {
+      border: 0;
+      border-radius: 999px;
+      background: #e45e5e;
+      color: white;
+      min-height: 34px;
+      padding: 0 11px;
+      font: inherit;
+      font-weight: 800;
+    }
+  `;
+  document.head.appendChild(romeAttackStyle);
+
+  const romeAttackHint = document.createElement('div');
+  romeAttackHint.id = 'romeAttackHint';
+  romeAttackHint.innerHTML = `<span>⚔️ ROMA SALDIRIYA AÇIK</span><button type="button" id="romeAttackHintBtn">Roma'ya Saldır</button>`;
+  document.body.appendChild(romeAttackHint);
+
+  function readyRomeAttackSources() {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return [];
+    if (!targetIsHostileForCurrentPlayer('rome')) return [];
+    const sources = [];
+    for (const [id, g] of troopGroups.entries()) {
+      if (g.owner !== game.current || g.ready < 1) continue;
+      if (adjacentLocations(id).has('rome')) sources.push(id);
+    }
+    return sources;
+  }
+
+  function romeSourceLabel(sourceId) {
+    const road = roadPieces.get(sourceId);
+    if (road) return `Roma önü yol (${road.gx}, ${road.gz})`;
+    return locationLabel(sourceId);
+  }
+
+  function decorateRomeAttackPlanner() {
+    if (!touchArmyPlan || touchArmyPlan.targetId !== 'rome') return;
+    const title = touchArmyPanel.querySelector('.tap-title');
+    const send = document.getElementById('tapArmySend');
+    const target = touchArmyPanel.querySelector('.tap-target');
+    if (title) title.textContent = "ROMA'YA SALDIRI";
+    if (target) target.innerHTML = `<strong>🏛️ Roma</strong> · kırmızı hedef · saldırı`;
+    if (send) send.textContent = "⚔️ Roma'ya Saldır";
+  }
+
+  const baseRomeRenderTouchArmyPlanner = renderTouchArmyPlanner;
+  renderTouchArmyPlanner = function(...args) {
+    const result = baseRomeRenderTouchArmyPlanner.apply(this, args);
+    decorateRomeAttackPlanner();
+    return result;
+  };
+
+  function beginRomeAttackFromSource(sourceId) {
+    const g = troopGroup(sourceId);
+    if (!g || g.owner !== game.current || g.ready < 1 || !adjacentLocations(sourceId).has('rome')) {
+      toast("Bu birlik artık Roma'ya saldırabilecek konumda değil.", false);
+      return;
+    }
+    openTouchArmyPlanner(sourceId);
+    if (!touchArmyPlan) return;
+    touchArmyPlan.targetId = 'rome';
+    touchArmyPlan.count = Math.max(1, Math.min(g.ready, touchArmyPlan.count || 1));
+    setModeText(`ROMA'YA SALDIRI: ${g.ready} hazır lejyon var. Sayıyı seç ve Roma'ya Saldır'a bas.`);
+    renderAll();
+    renderTouchArmyPlanner();
+  }
+
+  function openRomeAttackSelector() {
+    const sources = readyRomeAttackSources();
+    if (!sources.length) {
+      toast("Roma'ya komşu, bu tur hareket edebilecek birliğin yok.", false);
+      return;
+    }
+    if (sources.length === 1) {
+      beginRomeAttackFromSource(sources[0]);
+      return;
+    }
+    modalEl.innerHTML = `
+      <h3>⚔️ Roma'ya hangi birlik saldıracak?</h3>
+      <p>Roma'ya komşu birden fazla hazır ordun var. Saldıracak kaynağı seç.</p>
+      <div id="romeSourceChoices" style="display:grid;gap:8px"></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button></div>
+    `;
+    modalShade.classList.add('show');
+    const box = document.getElementById('romeSourceChoices');
+    for (const sourceId of sources) {
+      const g = troopGroup(sourceId);
+      const b = document.createElement('button');
+      b.className = 'primary';
+      b.textContent = `${romeSourceLabel(sourceId)} · ${g.ready} hazır lejyon`;
+      b.addEventListener('click', () => {
+        closeModal();
+        beginRomeAttackFromSource(sourceId);
+      });
+      box.appendChild(b);
+    }
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+  }
+
+  function refreshRomeAttackHint() {
+    const sources = readyRomeAttackSources();
+    const visible = sources.length > 0 && !modalShade.classList.contains('show') && !touchArmyPlan;
+    romeAttackHint.classList.toggle('show', visible);
+    if (visible) {
+      romeAttackHint.querySelector('span').textContent = sources.length === 1
+        ? `⚔️ ROMA SALDIRIYA AÇIK · ${troopGroup(sources[0]).ready} hazır`
+        : `⚔️ ROMA SALDIRIYA AÇIK · ${sources.length} ordu`;
+    }
+  }
+
+  document.getElementById('romeAttackHintBtn').addEventListener('click', openRomeAttackSelector);
+
+  const baseRomeUpdateNodeHighlights = updateNodeHighlights;
+  updateNodeHighlights = function(...args) {
+    const result = baseRomeUpdateNodeHighlights.apply(this, args);
+    const sources = readyRomeAttackSources();
+    if (sources.length) {
+      const rome = getRome();
+      if (rome) {
+        for (const group of rome.groups) {
+          group.scale.setScalar(1.085);
+          const base = group.children[0];
+          if (base?.material?.emissive) {
+            base.material.emissive.setHex(0x8f1f28);
+            base.material.emissiveIntensity = 1.0;
+          }
+        }
+      }
+    }
+    return result;
+  };
+
+  const baseRomeRenderAll = renderAll;
+  renderAll = function(...args) {
+    const result = baseRomeRenderAll.apply(this, args);
+    refreshRomeAttackHint();
+    return result;
+  };
+
+  // Direct tap on glowing Rome starts the dedicated attack flow on touch devices.
+  let romeAttackTouchPress = null;
+  renderer.domElement.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' || !readyRomeAttackSources().length || touchArmyPlan) return;
+    const loc = locationUnderPointer(e);
+    if (loc?.id !== 'rome') return;
+    romeAttackTouchPress = { x:e.clientX, y:e.clientY };
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, { capture:true, passive:false });
+
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (e.pointerType !== 'touch' || !romeAttackTouchPress) return;
+    const press = romeAttackTouchPress;
+    romeAttackTouchPress = null;
+    const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (moved > 18) return;
+    const loc = locationUnderPointer(e);
+    if (loc?.id === 'rome') openRomeAttackSelector();
+  }, { capture:true, passive:false });
+
+  // Keep the hint correct after modal close and screen rotation.
+  const baseRomeCloseModal = closeModal;
+  closeModal = function(...args) {
+    const result = baseRomeCloseModal.apply(this, args);
+    requestAnimationFrame(refreshRomeAttackHint);
+    return result;
+  };
+  window.addEventListener('resize', refreshRomeAttackHint);
+  requestAnimationFrame(() => { renderAll(); refreshRomeAttackHint(); });
