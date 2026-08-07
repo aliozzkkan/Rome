@@ -1,0 +1,473 @@
+turn results;
+  }
+
+  function traceRoadEnd(startRoad, dirIndex) {
+    if (!startRoad || !roadConnects(startRoad, dirIndex)) return null;
+    let gx = startRoad.gx;
+    let gz = startRoad.gz;
+    const seen = new Set([startRoad.id]);
+    while (true) {
+      const d = DIRS[dirIndex];
+      gx += d.dx; gz += d.dz;
+      const c = cellMap.get(k(gx,gz));
+      if (!c) return null;
+      if (c.kind === 'node') return { nodeId: c.id };
+      const r = roadPieces.get(c.id);
+      if (!r || seen.has(r.id) || !roadConnects(r, DIRS[dirIndex].opp) || !roadConnects(r, dirIndex)) return null;
+      seen.add(r.id);
+    }
+  }
+
+  function roadIsCompleted(road) {
+    if (!road) return false;
+    const dirs = road.orientation === 'v' ? [0,2] : [1,3];
+    return !!traceRoadEnd(road, dirs[0]) && !!traceRoadEnd(road, dirs[1]);
+  }
+
+  function updateRoadCompletionStatus() {
+    for (const r of roadPieces.values()) {
+      r.completed = roadIsCompleted(r);
+      const base = r.group.children[0];
+      const strip = r.group.children[1];
+      if (base?.material) {
+        base.material.color.setHex(r.completed ? 0x716b5f : 0x464944);
+        base.material.emissive?.setHex(r.completed ? 0x102719 : 0x000000);
+        base.material.emissiveIntensity = r.completed ? .28 : 0;
+      }
+      if (strip?.material) {
+        strip.material.color.setHex(r.completed ? 0xd7c7a2 : 0x8e846f);
+        strip.material.opacity = r.completed ? 1 : .58;
+        strip.material.transparent = !r.completed;
+      }
+    }
+  }
+
+  function nodeCapacity(node) {
+    if (!node) return Infinity;
+    if (node.type === 'fort' || node.type === 'home') return Math.max(1, node.level || 1) * 3;
+    return Infinity;
+  }
+
+  function locationCapacity(locationId) {
+    return nodeCapacity(nodes.get(locationId));
+  }
+
+  function freeCapacity(locationId, owner = game.current) {
+    const cap = locationCapacity(locationId);
+    if (!Number.isFinite(cap)) return Infinity;
+    const g = troopGroup(locationId);
+    const occupied = g && g.owner === owner ? g.ready + g.spent : 0;
+    return Math.max(0, cap - occupied);
+  }
+
+  function accessibleRoadSet(playerId) {
+    const out = new Set();
+    for (const node of nodes.values()) {
+      if (node.owner !== playerId) continue;
+      for (const conn of adjacentRoadConnectionsForNode(node)) {
+        const q = [conn.road];
+        while (q.length) {
+          const r = q.shift();
+          if (out.has(r.id)) continue;
+          out.add(r.id);
+          for (let i=0;i<4;i++) {
+            if (!roadConnects(r,i)) continue;
+            const d = DIRS[i];
+            const c = cellMap.get(k(r.gx+d.dx, r.gz+d.dz));
+            if (!c) continue;
+            if (c.kind === 'road') {
+              const nr = roadPieces.get(c.id);
+              if (roadConnects(nr,d.opp) && !out.has(nr.id)) q.push(nr);
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  function nodeIsAccessibleBuildAnchor(node, playerId) {
+    return node.owner === playerId;
+  }
+
+  function evaluateRoadPlacement(gx, gz, orientation, playerId) {
+    if (cellMap.has(k(gx,gz))) return null;
+    const accessible = accessibleRoadSet(playerId);
+    let matches = 0;
+    let accessibleMatches = 0;
+    for (let i=0;i<4;i++) {
+      const d = DIRS[i];
+      const c = cellMap.get(k(gx+d.dx, gz+d.dz));
+      if (!c) continue;
+      if (c.kind === 'road') {
+        const nr = roadPieces.get(c.id);
+        const cmp = roadRoadCompatible(orientation,gx,gz,i,nr);
+        if (!cmp.valid) return null;
+        if (cmp.match) {
+          matches++;
+          if (accessible.has(nr.id)) accessibleMatches++;
+        }
+      } else {
+        const mine = orientation === 'v' ? (i === 0 || i === 2) : (i === 1 || i === 3);
+        if (mine) {
+          matches++;
+          const n = nodes.get(c.id);
+          if (nodeIsAccessibleBuildAnchor(n, playerId)) accessibleMatches++;
+        }
+      }
+    }
+    if (matches < 1 || accessibleMatches < 1) return null;
+    return { kind: 'road', gx, gz, orientation, score: matches * 10 + accessibleMatches * 15 };
+  }
+
+  function evaluateFortPlacement(gx, gz, playerId) {
+    const c = cellMap.get(k(gx,gz));
+    const accessible = accessibleRoadSet(playerId);
+    if (c?.kind === 'node') {
+      const n = nodes.get(c.id);
+      if (n && n.owner === playerId && (n.type === 'fort' || n.type === 'home')) {
+        return { kind: 'fort', gx, gz, upgradeNodeId: n.id, upgradeRoadId: null, score: 70 + (n.level || 1) * 3 };
+      }
+      return null;
+    }
+    if (c?.kind === 'road') {
+      const r = roadPieces.get(c.id);
+      if (r.fixed || !accessible.has(r.id)) return null;
+      const rg = troopGroup(r.id);
+      if (rg && rg.owner !== playerId) return null;
+      if (troopTotal(r.id) > 3) return null;
+      return { kind: 'fort', gx, gz, upgradeRoadId: r.id, upgradeNodeId: null, score: 40 };
+    }
+    let anchor = false;
+    let score = 0;
+    for (let i=0;i<4;i++) {
+      const d = DIRS[i];
+      const nc = cellMap.get(k(gx+d.dx,gz+d.dz));
+      if (!nc) continue;
+      if (nc.kind === 'road') {
+        const r = roadPieces.get(nc.id);
+        if (roadConnects(r,d.opp) && accessible.has(r.id)) { anchor = true; score += 12; }
+      } else {
+        const n = nodes.get(nc.id);
+        if (n.owner === playerId) { anchor = true; score += 8; }
+      }
+    }
+    if (!anchor) return null;
+    return { kind: 'fort', gx, gz, upgradeRoadId: null, upgradeNodeId: null, score: 20 + score };
+  }
+
+  function nearestPlacementCandidate(wx, wz, type, playerId) {
+    const cgx = clampGrid(Math.round(wx / CELL));
+    const cgz = clampGrid(Math.round(wz / CELL));
+    let best = null;
+    for (let ox=-1;ox<=1;ox++) {
+      for (let oz=-1;oz<=1;oz++) {
+        const gx = clampGrid(cgx+ox), gz = clampGrid(cgz+oz);
+        const wp = world(gx,gz);
+        const dist = Math.hypot(wp.x-wx, wp.z-wz);
+        if (dist > CELL*1.25) continue;
+        if (type === 'road') {
+          for (const orientation of ['v','h']) {
+            const cand = evaluateRoadPlacement(gx,gz,orientation,playerId);
+            if (!cand) continue;
+            cand.distance = dist;
+            const merit = cand.score - dist*2;
+            if (!best || merit > best.merit) best = { ...cand, merit };
+          }
+        } else if (type === 'fort') {
+          const cand = evaluateFortPlacement(gx,gz,playerId);
+          if (!cand) continue;
+          cand.distance = dist;
+          const merit = cand.score - dist*2;
+          if (!best || merit > best.merit) best = { ...cand, merit };
+        }
+      }
+    }
+    return best;
+  }
+
+  function clearPreview() {
+    if (preview) scene.remove(preview);
+    preview = null;
+    hoverCandidate = null;
+  }
+
+  function showPreview(candidate, type) {
+    clearPreview();
+    if (!candidate) return;
+    preview = type === 'road'
+      ? makeRoadGroup(candidate.orientation, game.current, true)
+      : makeNodeCellGroup('fort', game.current, '', true);
+    const p = world(candidate.gx,candidate.gz);
+    preview.position.set(p.x, .035, p.z);
+    preview.traverse(o => { if (o.material) { o.material.depthWrite = false; } });
+    scene.add(preview);
+    hoverCandidate = candidate;
+  }
+
+  function locationObject(locationId) {
+    return nodes.get(locationId) || roadPieces.get(locationId) || null;
+  }
+
+  function locationLabel(locationId) {
+    const node = nodes.get(locationId);
+    if (node) return node.id === 'rome' ? 'Roma' : (node.type === 'home' ? `${PLAYER_NAMES[node.owner]} ana kalesi` : 'Kale');
+    return roadPieces.has(locationId) ? 'Yol' : 'Bölge';
+  }
+
+  function troopGroup(locationId) { return troopGroups.get(locationId) || null; }
+  function troopTotal(locationId) {
+    const g = troopGroup(locationId);
+    return g ? g.ready + g.spent : 0;
+  }
+
+  function setTroops(locationId, owner, ready, spent = 0) {
+    if (ready + spent <= 0) troopGroups.delete(locationId);
+    else troopGroups.set(locationId, { owner, ready, spent });
+    syncTroopVisual(locationId);
+  }
+
+  function addTroops(locationId, owner, readyAdd = 0, spentAdd = 0) {
+    const g = troopGroups.get(locationId);
+    if (g && g.owner !== owner) return false;
+    if (!g) troopGroups.set(locationId, { owner, ready: readyAdd, spent: spentAdd });
+    else { g.ready += readyAdd; g.spent += spentAdd; }
+    syncTroopVisual(locationId);
+    return true;
+  }
+
+  function removeTroops(locationId, readyRemove = 0, totalRemove = 0) {
+    const g = troopGroups.get(locationId);
+    if (!g) return;
+    if (readyRemove) g.ready = Math.max(0, g.ready - readyRemove);
+    if (totalRemove) {
+      let left = totalRemove;
+      const fromReady = Math.min(g.ready, left);
+      g.ready -= fromReady; left -= fromReady;
+      if (left) g.spent = Math.max(0, g.spent - left);
+    }
+    if (g.ready + g.spent <= 0) troopGroups.delete(locationId);
+    syncTroopVisual(locationId);
+  }
+
+  function syncTroopVisual(locationId) {
+    clearTroopVisual(locationId);
+    const node = nodes.get(locationId);
+    if (node) {
+      node.armies = troopTotal(locationId);
+      updateNodeVisual(node);
+    }
+    const g = troopGroup(locationId);
+    if (!g) return;
+
+    const visual = makeTroopStackVisual(g.owner, g.ready, g.spent, false);
+    visual.position.copy(locationWorldPosition(locationId));
+    scene.add(visual);
+    troopVisuals.set(locationId, visual);
+  }
+
+  function syncAllTroopVisuals() {
+    for (const node of nodes.values()) syncTroopVisual(node.id);
+    for (const road of roadPieces.values()) syncTroopVisual(road.id);
+  }
+
+  function refreshLegionsForTurn(playerId) {
+    for (const [locId, g] of troopGroups) {
+      if (g.owner !== playerId) continue;
+      g.ready += g.spent;
+      g.spent = 0;
+      syncTroopVisual(locId);
+    }
+  }
+
+  function adjacentLocations(locationId) {
+    const found = new Set();
+    updateRoadCompletionStatus();
+    const node = nodes.get(locationId);
+    if (node) {
+      for (const cell of node.cells) {
+        for (let i=0;i<4;i++) {
+          const d = DIRS[i];
+          const r = roadAt(cell.gx + d.dx, cell.gz + d.dz);
+          if (r && r.completed && roadConnects(r, d.opp)) found.add(r.id);
+        }
+      }
+      return found;
+    }
+    const road = roadPieces.get(locationId);
+    if (!road || !road.completed) return found;
+    for (let i=0;i<4;i++) {
+      if (!roadConnects(road,i)) continue;
+      const d = DIRS[i];
+      const c = cellMap.get(k(road.gx+d.dx, road.gz+d.dz));
+      if (!c) continue;
+      if (c.kind === 'road') {
+        const nr = roadPieces.get(c.id);
+        if (nr && nr.completed && roadConnects(nr,d.opp)) found.add(nr.id);
+      } else {
+        found.add(c.id);
+      }
+    }
+    return found;
+  }
+
+  function previousPlayerId(playerId = game.current) { return playerId === 1 ? 4 : playerId - 1; }
+
+  function connectedNodeTargets(sourceId) {
+    const source = nodes.get(sourceId);
+    const found = new Set();
+    if (!source) return found;
+    const visitedRoads = new Set();
+    const q = [];
+    for (const conn of adjacentRoadConnectionsForNode(source)) q.push(conn.road);
+    while (q.length) {
+      const r = q.shift();
+      if (visitedRoads.has(r.id)) continue;
+      visitedRoads.add(r.id);
+      for (let i=0;i<4;i++) {
+        if (!roadConnects(r,i)) continue;
+        const d = DIRS[i];
+        const c = cellMap.get(k(r.gx+d.dx,r.gz+d.dz));
+        if (!c) continue;
+        if (c.kind === 'road') {
+          const nr = roadPieces.get(c.id);
+          if (roadConnects(nr,d.opp) && !visitedRoads.has(nr.id)) q.push(nr);
+        } else if (c.id !== sourceId) {
+          found.add(c.id);
+        }
+      }
+    }
+    return found;
+  }
+
+  function playerHasPhysicalRouteToRome(playerId) {
+    const starts = [...nodes.values()].filter(n => n.owner === playerId).map(n => n.id);
+    const seenNodes = new Set(starts);
+    const q = [...starts];
+    while (q.length) {
+      const nid = q.shift();
+      for (const target of connectedNodeTargets(nid)) {
+        if (target === 'rome') return true;
+        if (seenNodes.has(target)) continue;
+        seenNodes.add(target);
+        q.push(target);
+      }
+    }
+    return false;
+  }
+
+  function defenseBonus(node) {
+    if (node.type === 'home' || node.type === 'fort') return Math.max(1, node.level || 1);
+    if (node.type === 'rome') return 2;
+    return 0;
+  }
+
+  function totalArmies(playerId) {
+    let n = 0;
+    for (const g of troopGroups.values()) if (g.owner === playerId) n += g.ready + g.spent;
+    return n;
+  }
+
+  function fortCount(playerId) {
+    let n = 0;
+    for (const node of nodes.values()) if (node.type === 'fort' && node.owner === playerId) n++;
+    return n;
+  }
+
+  function fortLevelSum(playerId) {
+    let n = 0;
+    for (const node of nodes.values()) if ((node.type === 'fort' || node.type === 'home') && node.owner === playerId) n += node.level || 1;
+    return n;
+  }
+
+  function getRome() { return nodes.get('rome'); }
+
+  function renderPlayers() {
+    playersEl.innerHTML = '';
+    for (const p of game.players) {
+      const row = document.createElement('div');
+      row.className = 'playerRow' + (p.id === game.current ? ' on' : '');
+      const route = playerHasPhysicalRouteToRome(p.id);
+      row.innerHTML = `
+        <div class="playerHead"><span><span class="dot" style="background:${PLAYER_CSS[p.id]}"></span><strong>${PLAYER_NAMES[p.id]}</strong></span><span>${p.hand.length}/7 kart</span></div>
+        <div class="playerStats"><span>⚔️ ${totalArmies(p.id)}</span><span>🏰 ${fortCount(p.id)} · LvΣ ${fortLevelSum(p.id)}</span><span>🗑️ ${p.discard.length}</span></div>
+        <div class="route ${route ? 'connected' : ''}">${route ? 'Roma’ya fiziksel yol var' : 'Roma’ya henüz yol yok'}</div>
+      `;
+      playersEl.appendChild(row);
+    }
+  }
+
+  function renderHand() {
+    handEl.innerHTML = '';
+    const p = currentPlayer();
+    const bot = p.isBot;
+    handHintEl.textContent = game.phase === 'refill'
+      ? `Kart alma fazı: elini 7’ye tamamla (${p.hand.length}/7)`
+      : game.phase === 'discard'
+        ? (bot ? `${PLAYER_NAMES[p.id]} turunu bitirmek için 1 kart atıyor.` : 'Turu bitirmek için aşağıdaki kartlardan 1 tanesini seçip at.')
+        : `El ${p.hand.length}/7 · Bu tur oynanan kart ${game.cardsPlayedThisTurn}/${MAX_CARDS_PER_TURN} · Tur sonunda 1 kart at.`;
+    for (const c of p.hand) {
+      const info = CARD_INFO[c.type];
+      const b = document.createElement('button');
+      b.className = 'handCard' + (game.selectedCardId === c.id ? ' selected' : '') + (REACTION_CARD_TYPES.has(c.type) ? ' tactic' : '');
+      b.dataset.cardId = c.id;
+      b.draggable = !game.gameOver && !bot && game.phase !== 'refill';
+      b.addEventListener('dragstart', e => {
+        if (!b.draggable) { e.preventDefault(); return; }
+        draggedHandCardId = c.id;
+        game.selectedCardId = c.id;
+        b.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', c.id);
+        if (game.phase === 'play' && c.type === 'road') setModeText('YOLU SÜRÜKLE: Geçerli yol ucuna bırak; yön otomatik snap olur.');
+        if (game.phase === 'play' && c.type === 'fort') setModeText('KALEYİ SÜRÜKLE: Bir yolun üstüne veya geçerli yol ucuna bırak.');
+      });
+      b.addEventListener('dragend', () => { draggedHandCardId = null; b.classList.remove('dragging'); clearPreview(); });
+      const hitCardLimit = game.phase === 'play' && !canPlayAnotherCard();
+      const reinforcementBlocked = game.phase === 'play' && c.type === 'reinforcement' && game.cardsPlayedThisTurn > MAX_CARDS_PER_TURN - 2;
+      b.disabled = game.gameOver || bot || game.phase === 'refill';
+      if (game.phase === 'play' && (hitCardLimit || reinforcementBlocked)) b.style.opacity = '.62';
+      b.innerHTML = `<span class="icon">${info.icon}</span><strong>${info.label}</strong>`;
+      b.addEventListener('click', () => {
+        if (bot) return;
+        if (game.phase === 'discard') discardAndFinishTurn(c.id);
+        else if (!REACTION_CARD_TYPES.has(c.type)) selectCard(c.id);
+      });
+      handEl.appendChild(b);
+    }
+    if (!p.hand.length) handEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 4px">Elinde kart yok.</div>';
+  }
+
+
+  function renderWorkbench() {
+    const p = currentPlayer();
+    const prev = playerById(previousPlayerId());
+    deckZone.classList.toggle('active', !p.isBot && game.phase === 'refill' && game.deck.length > 0);
+    deckZone.style.opacity = game.phase === 'refill' ? '1' : '.58';
+    deckZoneText.textContent = game.phase === 'refill' ? `Tıkla: ${game.deck.length} kart` : `${game.deck.length} kart kaldı`;
+    turnDiscardZone.classList.toggle('active', !p.isBot && (game.phase === 'play' || game.phase === 'discard'));
+    prevDiscardZone.classList.toggle('active', !p.isBot && game.phase === 'refill' && prev.discard.length > 0);
+    prevDiscardCards.innerHTML = '';
+    for (const c of prev.discard.slice().reverse().slice(0,8)) {
+      const info = CARD_INFO[c.type];
+      const el = document.createElement('div');
+      el.className = 'miniDiscard';
+      el.draggable = !p.isBot && game.phase === 'refill';
+      el.dataset.cardId = c.id;
+      el.textContent = `${info.icon} ${info.label}`;
+      el.title = info.desc;
+      el.addEventListener('click', () => { if (game.phase === 'refill' && !p.isBot) takePreviousDiscard(c.id); });
+      el.addEventListener('dragstart', e => { draggedDiscardCardId = c.id; e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain', c.id); });
+      el.addEventListener('dragend', () => { draggedDiscardCardId = null; });
+      prevDiscardCards.appendChild(el);
+    }
+  }
+
+  function renderReferenceTable() {
+    referenceTableBody.innerHTML = Object.entries(CARD_COUNTS).map(([type,count]) => {
+      const info = CARD_INFO[type];
+      return `<tr><td>${info.icon} <strong>${info.label}</strong></td><td>${count}</td><td>${info.desc}</td></tr>`;
+    }).join('');
+  }
+
+  
