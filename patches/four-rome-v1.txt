@@ -1,0 +1,279 @@
+
+  // --- Four independent Rome castles ---
+  const ROME_CASTLE_IDS = ['rome-n','rome-e','rome-s','rome-w'];
+  const ROME_CASTLE_NAMES = {
+    'rome-n': 'Roma Kuzey Kalesi',
+    'rome-e': 'Roma Doğu Kalesi',
+    'rome-s': 'Roma Güney Kalesi',
+    'rome-w': 'Roma Batı Kalesi',
+  };
+
+  function getRomeCastles() {
+    return ROME_CASTLE_IDS.map(id => nodes.get(id)).filter(Boolean);
+  }
+
+  function isRomeCastleId(id) {
+    return ROME_CASTLE_IDS.includes(id);
+  }
+
+  // Keep legacy callers alive: "Rome" as a whole is controlled only if one player owns all 4 castles.
+  getRome = function() {
+    const castles = getRomeCastles();
+    const firstOwner = castles[0]?.owner || 0;
+    const owner = castles.length === 4 && firstOwner && castles.every(n => n.owner === firstOwner) ? firstOwner : 0;
+    return {
+      id: 'rome',
+      type: 'rome',
+      owner,
+      groups: castles.flatMap(n => n.groups || []),
+      cells: castles.flatMap(n => n.cells || []),
+      armies: castles.reduce((sum,n) => sum + troopTotal(n.id), 0),
+      level: 1,
+    };
+  };
+
+  const baseFourRomeLocationLabel = locationLabel;
+  locationLabel = function(locationId) {
+    if (isRomeCastleId(locationId)) return ROME_CASTLE_NAMES[locationId];
+    return baseFourRomeLocationLabel(locationId);
+  };
+
+  // Every Rome tile is a real independent node, with its own owner and army.
+  setupBoard = function() {
+    createNode('rome-n','rome',0,0,[{gx:0,gz:0}],true);
+    createNode('rome-e','rome',0,0,[{gx:1,gz:0}],true);
+    createNode('rome-s','rome',0,0,[{gx:1,gz:1}],true);
+    createNode('rome-w','rome',0,0,[{gx:0,gz:1}],true);
+
+    createNode('home-1','home',1,0,[{gx:0,gz:-5}],true);
+    createNode('home-2','home',2,0,[{gx:6,gz:0}],true);
+    createNode('home-3','home',3,0,[{gx:1,gz:6}],true);
+    createNode('home-4','home',4,0,[{gx:-5,gz:1}],true);
+
+    for (const id of ROME_CASTLE_IDS) setTroops(id,0,4,0);
+    for (let i=1;i<=4;i++) setTroops(`home-${i}`,i,1,0);
+    syncAllTroopVisuals();
+    updateRoadCompletionStatus();
+  };
+
+  // A physical route to any of the four Rome castles counts as reaching Rome.
+  playerHasPhysicalRouteToRome = function(playerId) {
+    const starts = [...nodes.values()].filter(n => n.owner === playerId).map(n => n.id);
+    const seenNodes = new Set(starts);
+    const q = [...starts];
+    while (q.length) {
+      const nid = q.shift();
+      for (const target of connectedNodeTargets(nid)) {
+        if (isRomeCastleId(target)) return true;
+        if (seenNodes.has(target)) continue;
+        seenNodes.add(target);
+        q.push(target);
+      }
+    }
+    return false;
+  };
+
+  // Give each Rome castle its own readable label instead of one combined 2x2 Rome label.
+  const baseFourRomeUpdateNodeVisual = updateNodeVisual;
+  updateNodeVisual = function(node) {
+    const result = baseFourRomeUpdateNodeVisual(node);
+    if (!node || !isRomeCastleId(node.id) || !node.groups?.length) return result;
+    const labelGroup = node.groups[0];
+    for (const child of [...labelGroup.children]) {
+      if (child.userData?.nodeLabel) labelGroup.remove(child);
+    }
+    const short = node.id === 'rome-n' ? 'ROMA KUZEY' : node.id === 'rome-e' ? 'ROMA DOĞU' : node.id === 'rome-s' ? 'ROMA GÜNEY' : 'ROMA BATI';
+    const spr = makeLabel(`${short} • ${troopTotal(node.id)}`);
+    spr.position.set(0, 1.08, 0);
+    spr.userData.nodeLabel = true;
+    labelGroup.add(spr);
+    return result;
+  };
+
+  function romeControlSummary() {
+    const counts = {0:0,1:0,2:0,3:0,4:0};
+    for (const n of getRomeCastles()) counts[n.owner || 0] += 1;
+    const parts = [];
+    for (let p=1;p<=4;p++) if (counts[p]) parts.push(`P${p} ${counts[p]}`);
+    if (counts[0]) parts.push(`T ${counts[0]}`);
+    return parts.join(' · ') || 'Tarafsız';
+  }
+
+  const baseFourRomeRenderTop = renderTop;
+  renderTop = function(...args) {
+    const result = baseFourRomeRenderTop.apply(this,args);
+    if (romeOwnerValueEl) {
+      romeOwnerValueEl.textContent = romeControlSummary();
+      const allOwner = getRome().owner;
+      romeOwnerValueEl.style.color = allOwner ? PLAYER_CSS[allOwner] : '#e4cc94';
+    }
+    return result;
+  };
+
+  // --- Dedicated four-castle Rome attack flow ---
+  const fourRomeStyle = document.createElement('style');
+  fourRomeStyle.textContent = `
+    #fourRomeAttackHint {
+      position: fixed; z-index: 151; top: 68px; left: 50%; transform: translateX(-50%);
+      display:none; align-items:center; gap:8px; padding:9px 13px; border-radius:999px;
+      border:1px solid rgba(255,106,106,.72); background:rgba(69,16,20,.94); color:#ffe7e7;
+      font-size:12px; font-weight:800; letter-spacing:.04em; box-shadow:0 10px 28px rgba(0,0,0,.35);
+      backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    }
+    #fourRomeAttackHint.show { display:flex; }
+    #fourRomeAttackHint button { border:0; border-radius:999px; background:#e45e5e; color:white; min-height:34px; padding:0 11px; font:inherit; font-weight:800; }
+  `;
+  document.head.appendChild(fourRomeStyle);
+
+  const fourRomeAttackHint = document.createElement('div');
+  fourRomeAttackHint.id = 'fourRomeAttackHint';
+  fourRomeAttackHint.innerHTML = `<span>⚔️ ROMA KALESİ SALDIRIYA AÇIK</span><button type="button" id="fourRomeAttackBtn">Hedef Seç</button>`;
+  document.body.appendChild(fourRomeAttackHint);
+
+  function readyRomeCastleAttacks() {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return [];
+    const pairs = [];
+    for (const [sourceId,g] of troopGroups.entries()) {
+      if (g.owner !== game.current || g.ready < 1) continue;
+      const adjacent = adjacentLocations(sourceId);
+      for (const targetId of adjacent) {
+        if (!isRomeCastleId(targetId)) continue;
+        if (!targetIsHostileForCurrentPlayer(targetId)) continue;
+        pairs.push({sourceId,targetId});
+      }
+    }
+    return pairs;
+  }
+
+  function beginRomeCastleAttack(sourceId,targetId) {
+    const g = troopGroup(sourceId);
+    if (!g || g.owner !== game.current || g.ready < 1 || !adjacentLocations(sourceId).has(targetId)) {
+      toast('Bu birlik artık seçilen Roma kalesine saldırabilecek konumda değil.', false);
+      return;
+    }
+    openTouchArmyPlanner(sourceId);
+    if (!touchArmyPlan) return;
+    touchArmyPlan.targetId = targetId;
+    touchArmyPlan.count = Math.max(1, Math.min(g.ready, touchArmyPlan.count || 1));
+    setModeText(`${ROME_CASTLE_NAMES[targetId].toUpperCase()}: ${g.ready} hazır lejyon var. Sayıyı seç ve saldır.`);
+    renderAll();
+    renderTouchArmyPlanner();
+  }
+
+  function openRomeCastleAttackSelector(targetFilter = null) {
+    let pairs = readyRomeCastleAttacks();
+    if (targetFilter) pairs = pairs.filter(x => x.targetId === targetFilter);
+    if (!pairs.length) {
+      toast('Bu Roma kalesine komşu, bu tur hareket edebilecek birliğin yok.', false);
+      return;
+    }
+    if (pairs.length === 1) {
+      beginRomeCastleAttack(pairs[0].sourceId,pairs[0].targetId);
+      return;
+    }
+    modalEl.innerHTML = `
+      <h3>⚔️ Hangi Roma kalesine saldıracaksın?</h3>
+      <p>Her Roma kalesi ayrı hedef ve her birinde bağımsız savunma ordusu var.</p>
+      <div id="fourRomeChoices" style="display:grid;gap:8px"></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button></div>
+    `;
+    modalShade.classList.add('show');
+    const box = document.getElementById('fourRomeChoices');
+    for (const pair of pairs) {
+      const g = troopGroup(pair.sourceId);
+      const b = document.createElement('button');
+      b.className = 'primary';
+      b.textContent = `${ROME_CASTLE_NAMES[pair.targetId]} · ${g?.ready || 0} hazır lejyon`;
+      b.addEventListener('click', () => { closeModal(); beginRomeCastleAttack(pair.sourceId,pair.targetId); });
+      box.appendChild(b);
+    }
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+  }
+
+  // Make the touch movement panel explicitly say which Rome castle is being attacked.
+  const baseFourRomePlannerRender = renderTouchArmyPlanner;
+  renderTouchArmyPlanner = function(...args) {
+    const result = baseFourRomePlannerRender.apply(this,args);
+    const targetId = touchArmyPlan?.targetId;
+    if (isRomeCastleId(targetId)) {
+      const title = touchArmyPanel.querySelector('.tap-title');
+      const target = touchArmyPanel.querySelector('.tap-target');
+      const send = document.getElementById('tapArmySend');
+      if (title) title.textContent = "ROMA KALESİNE SALDIRI";
+      if (target) target.innerHTML = `<strong>🏛️ ${ROME_CASTLE_NAMES[targetId]}</strong> · ⚔️ saldırı`;
+      if (send) send.textContent = '⚔️ Roma Kalesine Saldır';
+    }
+    return result;
+  };
+
+  function refreshFourRomeAttackHint() {
+    const pairs = readyRomeCastleAttacks();
+    const uniqueTargets = [...new Set(pairs.map(x => x.targetId))];
+    const visible = pairs.length > 0 && !modalShade.classList.contains('show') && !touchArmyPlan;
+    fourRomeAttackHint.classList.toggle('show',visible);
+    if (visible) {
+      fourRomeAttackHint.querySelector('span').textContent = uniqueTargets.length === 1
+        ? `⚔️ ${ROME_CASTLE_NAMES[uniqueTargets[0]].toUpperCase()} SALDIRIYA AÇIK`
+        : `⚔️ ${uniqueTargets.length} ROMA KALESİ SALDIRIYA AÇIK`;
+    }
+  }
+
+  document.getElementById('fourRomeAttackBtn').addEventListener('click', () => openRomeCastleAttackSelector());
+
+  // Preserve standard selection highlights, then make only actually attackable Rome castles glow red.
+  const baseFourRomeHighlights = updateNodeHighlights;
+  updateNodeHighlights = function(...args) {
+    const result = baseFourRomeHighlights.apply(this,args);
+    const targetIds = new Set(readyRomeCastleAttacks().map(x => x.targetId));
+    if (!touchArmyPlan && targetIds.size) {
+      for (const targetId of targetIds) {
+        const node = nodes.get(targetId);
+        if (!node) continue;
+        for (const group of node.groups) {
+          group.scale.setScalar(1.09);
+          const base = group.children[0];
+          if (base?.material?.emissive) {
+            base.material.emissive.setHex(0x8f1f28);
+            base.material.emissiveIntensity = 1.0;
+          }
+        }
+      }
+    }
+    return result;
+  };
+
+  const baseFourRomeRenderAll = renderAll;
+  renderAll = function(...args) {
+    const result = baseFourRomeRenderAll.apply(this,args);
+    refreshFourRomeAttackHint();
+    return result;
+  };
+
+  // Direct touch on a glowing specific Rome castle opens that castle's attack flow.
+  let fourRomeTouchPress = null;
+  renderer.domElement.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' || touchArmyPlan || !readyRomeCastleAttacks().length) return;
+    const loc = locationUnderPointer(e);
+    if (!loc || !isRomeCastleId(loc.id)) return;
+    const canAttack = readyRomeCastleAttacks().some(x => x.targetId === loc.id);
+    if (!canAttack) return;
+    fourRomeTouchPress = {x:e.clientX,y:e.clientY,targetId:loc.id};
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, {capture:true,passive:false});
+
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (e.pointerType !== 'touch' || !fourRomeTouchPress) return;
+    const press = fourRomeTouchPress;
+    fourRomeTouchPress = null;
+    const moved = Math.hypot(e.clientX-press.x,e.clientY-press.y);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (moved > 18) return;
+    const loc = locationUnderPointer(e);
+    if (loc?.id === press.targetId) openRomeCastleAttackSelector(press.targetId);
+  }, {capture:true,passive:false});
+
+  // Rebuild the already-created board once, now using four independent Rome nodes and 1 starting troop per player.
+  resetGame();
+  requestAnimationFrame(() => { renderAll(); refreshFourRomeAttackHint(); });
