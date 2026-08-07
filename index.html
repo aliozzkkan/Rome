@@ -38,7 +38,8 @@
         }
 
         let gameHtml = parts.join('');
-        const finalScriptClose = gameHtml.lastIndexOf('</script>');
+        const scriptEndTag = '</scr' + 'ipt>';
+        const finalScriptClose = gameHtml.lastIndexOf(scriptEndTag);
         if (finalScriptClose < 0) throw new Error('Oyun script kapanışı bulunamadı.');
         gameHtml = gameHtml.slice(0, finalScriptClose) + patches.join('\n') + '\n' + gameHtml.slice(finalScriptClose);
 
