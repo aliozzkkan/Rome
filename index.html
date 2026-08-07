@@ -26,14 +26,21 @@
           parts.push(await response.text());
         }
 
-        const patchResponse = await fetch('patches/touch-army-v1.txt', { cache: 'no-store' });
-        if (!patchResponse.ok) throw new Error('Dokunmatik birlik kontrolü yüklenemedi: ' + patchResponse.status);
-        const touchArmyPatch = await patchResponse.text();
+        const patchFiles = [
+          'patches/touch-army-v1.txt',
+          'patches/rome-attack-v1.txt'
+        ];
+        const patches = [];
+        for (const patchFile of patchFiles) {
+          const response = await fetch(patchFile, { cache: 'no-store' });
+          if (!response.ok) throw new Error(patchFile + ' yüklenemedi: ' + response.status);
+          patches.push(await response.text());
+        }
 
         let gameHtml = parts.join('');
         const finalScriptClose = gameHtml.lastIndexOf('</script>');
         if (finalScriptClose < 0) throw new Error('Oyun script kapanışı bulunamadı.');
-        gameHtml = gameHtml.slice(0, finalScriptClose) + touchArmyPatch + '\n' + gameHtml.slice(finalScriptClose);
+        gameHtml = gameHtml.slice(0, finalScriptClose) + patches.join('\n') + '\n' + gameHtml.slice(finalScriptClose);
 
         document.open();
         document.write(gameHtml);
