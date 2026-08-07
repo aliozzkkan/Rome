@@ -1,0 +1,93 @@
+
+  // === PHASE 3: battle report screen ===
+  const battleReportStyle = document.createElement('style');
+  battleReportStyle.textContent = `
+    #battleReportShade{position:fixed;inset:0;z-index:230;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(2,5,8,.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+    #battleReportShade.show{display:flex}
+    #battleReportCard{width:min(650px,100%);background:#171d23;border:1px solid rgba(255,255,255,.16);border-radius:18px;padding:16px;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+    #battleReportCard h3{margin:0 0 3px;font-size:18px} #battleReportCard .brSub{color:#aeb8c1;font-size:11px;margin-bottom:13px}
+    #battleReportCard .brResult{padding:11px;border-radius:12px;margin-bottom:12px;background:rgba(216,181,106,.09);border:1px solid rgba(216,181,106,.25);font-weight:800}
+    #battleReportCard .brGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    #battleReportCard .brSide{border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:11px;background:rgba(255,255,255,.025)}
+    #battleReportCard .brSide h4{margin:0 0 8px;font-size:12px} #battleReportCard .brLine{display:flex;justify-content:space-between;gap:12px;padding:4px 0;font-size:11px;color:#c8d0d6}
+    #battleReportCard .brLine strong{color:#f3efe6} #battleReportCard .brActions{display:flex;justify-content:flex-end;margin-top:13px}
+    @media(max-width:600px){#battleReportCard .brGrid{grid-template-columns:1fr}}
+  `;
+  document.head.appendChild(battleReportStyle);
+  const battleReportShade = document.createElement('div');
+  battleReportShade.id = 'battleReportShade';
+  battleReportShade.innerHTML = '<div id="battleReportCard"></div>';
+  document.body.appendChild(battleReportShade);
+  const battleReportCard = battleReportShade.querySelector('#battleReportCard');
+
+  function closeBattleReport(){ battleReportShade.classList.remove('show'); battleReportCard.innerHTML=''; }
+  battleReportShade.addEventListener('click',e=>{ if(e.target===battleReportShade) closeBattleReport(); });
+
+  function queueBattleReport(report) {
+    if (!report) return;
+    if (report.attacker !== HUMAN_PLAYER_ID && report.defender !== HUMAN_PLAYER_ID) return;
+    setTimeout(() => {
+      const resultText = report.captured
+        ? `🏆 ${PLAYER_NAMES[report.attacker]} ${report.targetLabel} bölgesini ele geçirdi.`
+        : report.attackerWon ? `✅ ${PLAYER_NAMES[report.attacker]} saldırıyı kazandı.` : `🛡️ Savunma saldırıyı durdurdu.`;
+      battleReportCard.innerHTML = `
+        <h3>⚔️ Savaş Raporu</h3>
+        <div class="brSub">${report.targetLabel || 'Savaş alanı'}</div>
+        <div class="brResult">${resultText}</div>
+        <div class="brGrid">
+          <div class="brSide">
+            <h4>🔴 SALDIRAN · ${PLAYER_NAMES[report.attacker] || 'Oyuncu'}</h4>
+            <div class="brLine"><span>Gönderilen</span><strong>${report.attackerUnitsText || report.attackerBefore || 0}</strong></div>
+            <div class="brLine"><span>Saldırı gücü</span><strong>${report.attackPower ?? '—'}</strong></div>
+            <div class="brLine"><span>Kayıp</span><strong>${report.attackerLosses ?? 0}</strong></div>
+            <div class="brLine"><span>Savaş sonrası kalan</span><strong>${report.attackerSurvivors ?? 0}</strong></div>
+          </div>
+          <div class="brSide">
+            <h4>🔵 SAVUNAN · ${report.defender ? PLAYER_NAMES[report.defender] : 'Roma / Tarafsız'}</h4>
+            <div class="brLine"><span>Başlangıç birliği</span><strong>${report.defenderBefore ?? 0}</strong></div>
+            <div class="brLine"><span>Savunma gücü</span><strong>${report.defensePower ?? '—'}</strong></div>
+            <div class="brLine"><span>Kayıp</span><strong>${report.defenderLosses ?? 0}</strong></div>
+            <div class="brLine"><span>Savaş sonrası kalan</span><strong>${report.defenderAfter ?? 0}</strong></div>
+          </div>
+        </div>
+        <div class="brActions"><button id="battleReportClose" class="primary">Devam Et</button></div>
+      `;
+      battleReportShade.classList.add('show');
+      document.getElementById('battleReportClose').addEventListener('click',closeBattleReport);
+    },110);
+  }
+
+  function battleSnapshot(locationId) {
+    const g = troopGroup(locationId);
+    return {
+      owner:g?.owner || nodes.get(locationId)?.owner || 0,
+      units:g ? (typeof unitTotalInGroup === 'function' ? unitTotalInGroup(g) : (g.ready||0)+(g.spent||0)) : 0,
+      legions:g ? (g.ready||0)+(g.spent||0) : 0,
+      cavalry:g && typeof cavalryTotalInGroup === 'function' ? cavalryTotalInGroup(g) : 0,
+    };
+  }
+
+  // Legacy wrapper. Phase 4 replaces battle math and calls queueBattleReport with exact stat-based values.
+  const baseBattleReportResolveMixedBattle = resolveMixedBattle;
+  resolveMixedBattle = function(sourceId,targetId,legions,cavalry,atkSupport='none',defSupport='none') {
+    const attacker = game.current;
+    const beforeTarget = battleSnapshot(targetId);
+    const attackCount = (legions||0)+(cavalry||0);
+    const oldOwner = nodes.get(targetId)?.owner || beforeTarget.owner;
+    const result = baseBattleReportResolveMixedBattle.call(this,sourceId,targetId,legions,cavalry,atkSupport,defSupport);
+    const afterTarget = battleSnapshot(targetId);
+    const newOwner = nodes.get(targetId)?.owner || afterTarget.owner;
+    queueBattleReport({
+      attacker, defender:beforeTarget.owner, targetLabel:locationLabel(targetId),
+      attackerUnitsText:`⚔ ${legions||0}${cavalry ? ` · 🐎 ${cavalry}` : ''}`,
+      attackerBefore:attackCount, attackerLosses:Math.max(0,attackCount-(newOwner===attacker?afterTarget.units:0)), attackerSurvivors:newOwner===attacker?afterTarget.units:0,
+      defenderBefore:beforeTarget.units, defenderLosses:Math.max(0,beforeTarget.units-(newOwner===beforeTarget.owner?afterTarget.units:0)), defenderAfter:newOwner===beforeTarget.owner?afterTarget.units:0,
+      attackPower:(legions||0)+(cavalry||0)*2, defensePower:beforeTarget.units+(nodes.get(targetId)?defenseBonus(nodes.get(targetId)):0),
+      attackerWon:newOwner===attacker, captured:oldOwner!==attacker && newOwner===attacker
+    });
+    return result;
+  };
+
+  resolveBattle = function(sourceId,targetId,committed,atkSupport='none',defSupport='none') {
+    return resolveMixedBattle(sourceId,targetId,committed,0,atkSupport,defSupport);
+  };
