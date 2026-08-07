@@ -1,0 +1,512 @@
+LY;
+  controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+  controls.update();
+
+  scene.add(new THREE.HemisphereLight(0xf8ead1, 0x24313a, 2.25));
+  const sun = new THREE.DirectionalLight(0xfff0d0, 2.8);
+  sun.position.set(-11, 18, 10);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -24;
+  sun.shadow.camera.right = 24;
+  sun.shadow.camera.top = 24;
+  sun.shadow.camera.bottom = -24;
+  scene.add(sun);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(44, 44),
+    new THREE.MeshStandardMaterial({ color: 0x26342e, roughness: 1 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -.075;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  const grid = new THREE.GridHelper(36.3, 22, 0x708173, 0x45564b);
+  grid.position.set(CELL / 2, -.035, CELL / 2);
+  grid.material.opacity = .22;
+  grid.material.transparent = true;
+  scene.add(grid);
+
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  let pointerDown = null;
+  let toastTimer = null;
+  let draggedHandCardId = null;
+  let draggedDiscardCardId = null;
+  let troopDrag = null;
+
+  const roadPieces = new Map();
+  const nodes = new Map();
+  const cellMap = new Map();
+  const logs = [];
+  const sceneInteractive = [];
+  const troopGroups = new Map(); // locationId -> { owner, ready, spent }
+  const troopVisuals = new Map(); // locationId -> THREE.Group (3D lejyon figürleri)
+  const troopAnimations = []; // geçici yürüyüş/charge animasyonları
+
+  let nextRoadId = 1;
+  let nextFortId = 1;
+  let nextCardId = 1;
+  let preview = null;
+  let hoverCandidate = null;
+
+  const game = {
+    players: [],
+    deck: [],
+    spentPile: [],
+    current: 1,
+    round: 1,
+    turnSerial: 0,
+    phase: 'play', // refill | play | discard
+    selectedCardId: null,
+    mode: 'idle',
+    selectedNodeId: null,
+    selectedLocationId: null,
+    reachable: new Set(),
+    finalRoundActive: false,
+    finalRoundOrigin: null,
+    gameOver: false,
+    cardsPlayedThisTurn: 0,
+    botBusy: false,
+  };
+
+  function k(gx, gz) { return `${gx},${gz}`; }
+  function world(gx, gz) { return new THREE.Vector3(gx * CELL, 0, gz * CELL); }
+  function clampGrid(v) { return Math.max(-10, Math.min(11, v)); }
+  function card(type) { return { id: `card-${nextCardId++}`, type }; }
+  function currentPlayer() { return game.players[game.current - 1]; }
+  function isBotPlayer(playerId = game.current) { return !!playerById(playerId)?.isBot; }
+  function canPlayAnotherCard() { return game.cardsPlayedThisTurn < MAX_CARDS_PER_TURN; }
+  function playerById(id) { return game.players[id - 1]; }
+  function ownerName(owner) { return owner ? PLAYER_NAMES[owner] : 'Tarafsız'; }
+
+  function addLog(text, strong = '') {
+    logs.unshift({ text, strong });
+    if (logs.length > 8) logs.length = 8;
+    renderLog();
+  }
+
+  function renderLog() {
+    logListEl.innerHTML = logs.map(l => `<div class="logItem">${l.strong ? `<strong>${l.strong}</strong> ` : ''}${l.text}</div>`).join('');
+  }
+
+  function toast(msg, good = true) {
+    toastEl.textContent = msg;
+    toastEl.style.borderColor = good ? 'rgba(114,208,154,.5)' : 'rgba(232,118,120,.55)';
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1450);
+  }
+
+  function makeLabel(text, color = '#f6eddc', scale = 1) {
+    const c = document.createElement('canvas');
+    c.width = 512; c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.fillStyle = 'rgba(10,13,16,.82)';
+    ctx.beginPath();
+    ctx.roundRect(24, 24, 464, 80, 18);
+    ctx.fill();
+    ctx.font = '700 38px system-ui';
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 256, 64);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+    sprite.scale.set(1.62 * scale, .405 * scale, 1);
+    return sprite;
+  }
+
+  function troopColor(owner) {
+    return owner ? PLAYER_COLORS[owner] : 0xb8b1a3;
+  }
+
+  function makeLegionSoldier(owner, spent = false) {
+    const group = new THREE.Group();
+    const color = troopColor(owner);
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color,
+      roughness: .62,
+      metalness: .08,
+      transparent: spent,
+      opacity: spent ? .55 : 1,
+    });
+    const metalMat = new THREE.MeshStandardMaterial({
+      color: owner ? 0xe1d8c7 : 0xc8c1b6,
+      roughness: .42,
+      metalness: .55,
+      transparent: spent,
+      opacity: spent ? .5 : 1,
+    });
+    const leatherMat = new THREE.MeshStandardMaterial({
+      color: 0x5b3928,
+      roughness: .9,
+      transparent: spent,
+      opacity: spent ? .5 : 1,
+    });
+
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(.075, .105, .27, 10), bodyMat);
+    torso.position.y = .22;
+    torso.castShadow = true;
+    group.add(torso);
+
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(.11, .075, .11, 10), leatherMat);
+    skirt.position.y = .08;
+    skirt.castShadow = true;
+    group.add(skirt);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(.075, 12, 10), new THREE.MeshStandardMaterial({ color: 0xd2aa83, roughness: .85, transparent: spent, opacity: spent ? .55 : 1 }));
+    head.position.y = .405;
+    head.castShadow = true;
+    group.add(head);
+
+    const helmet = new THREE.Mesh(new THREE.SphereGeometry(.082, 12, 8, 0, Math.PI * 2, 0, Math.PI * .55), metalMat);
+    helmet.position.y = .435;
+    helmet.castShadow = true;
+    group.add(helmet);
+
+    const plume = new THREE.Mesh(new THREE.BoxGeometry(.035, .1, .02), bodyMat);
+    plume.position.set(0, .515, 0);
+    plume.castShadow = true;
+    group.add(plume);
+
+    const shield = new THREE.Mesh(new THREE.CylinderGeometry(.105, .105, .028, 16), bodyMat);
+    shield.rotation.z = Math.PI / 2;
+    shield.position.set(-.105, .22, .015);
+    shield.castShadow = true;
+    group.add(shield);
+
+    const spear = new THREE.Mesh(new THREE.CylinderGeometry(.012, .012, .55, 8), metalMat);
+    spear.position.set(.11, .27, 0);
+    spear.rotation.z = -.08;
+    spear.castShadow = true;
+    group.add(spear);
+
+    const footMat = leatherMat;
+    for (const x of [-.038, .038]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(.018, .022, .13, 7), footMat);
+      leg.position.set(x, -.03, 0);
+      leg.castShadow = true;
+      group.add(leg);
+    }
+    return group;
+  }
+
+  function makeTroopStackVisual(owner, ready, spent = 0, moving = false) {
+    const total = ready + spent;
+    const group = new THREE.Group();
+    group.userData.troopStack = true;
+    const shown = Math.min(total, 5);
+    const spots = [
+      [-.18, -.14], [.18, -.14], [-.18, .15], [.18, .15], [0, 0],
+    ];
+    for (let i = 0; i < shown; i++) {
+      const isSpent = i >= Math.min(ready, shown);
+      const soldier = makeLegionSoldier(owner, moving ? false : isSpent);
+      soldier.position.set(spots[i][0], 0, spots[i][1]);
+      soldier.rotation.y = (i % 2 ? -.12 : .12);
+      group.add(soldier);
+    }
+
+    const ring = new THREE.Mesh(
+      new THREE.CylinderGeometry(.36, .36, .025, 28),
+      new THREE.MeshStandardMaterial({ color: troopColor(owner), roughness: .75, transparent: true, opacity: .42 })
+    );
+    ring.position.y = -.095;
+    ring.receiveShadow = true;
+    group.add(ring);
+
+    const status = owner ? `P${owner}  ⚔ ×${total}${spent ? `  • ${ready} hazır` : ''}` : `ROMA  ⚔ ×${total}`;
+    const label = makeLabel(status, owner ? (PLAYER_CSS[owner] || '#f6eddc') : '#e7ddd0', .43);
+    label.position.set(0, .78, 0);
+    label.userData.troopCountLabel = true;
+    group.add(label);
+    return group;
+  }
+
+  function locationWorldPosition(locationId) {
+    const road = roadPieces.get(locationId);
+    if (road) {
+      const p = world(road.gx, road.gz);
+      return new THREE.Vector3(p.x, .28, p.z);
+    }
+    const node = nodes.get(locationId);
+    if (!node || !node.cells?.length) return new THREE.Vector3();
+    let gx = 0, gz = 0;
+    for (const c of node.cells) { gx += c.gx; gz += c.gz; }
+    gx /= node.cells.length; gz /= node.cells.length;
+    const p = world(gx, gz);
+    if (node.cells.length === 1) {
+      p.x += .39;
+      p.z += .39;
+    }
+    return new THREE.Vector3(p.x, .30, p.z);
+  }
+
+  function disposeObject3D(root) {
+    root.traverse(obj => {
+      if (obj.geometry) obj.geometry.dispose?.();
+      if (obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+          mat.map?.dispose?.();
+          mat.dispose?.();
+        }
+      }
+    });
+  }
+
+  function clearTroopVisual(locationId) {
+    const visual = troopVisuals.get(locationId);
+    if (!visual) return;
+    scene.remove(visual);
+    disposeObject3D(visual);
+    troopVisuals.delete(locationId);
+  }
+
+  function animateTroopMarch(owner, count, sourceId, targetId, kind = 'move') {
+    const start = locationWorldPosition(sourceId);
+    const end = locationWorldPosition(targetId);
+    if (!start || !end) return;
+    const visual = makeTroopStackVisual(owner, Math.min(count, 5), 0, true);
+    visual.scale.setScalar(.92);
+    visual.position.copy(start);
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    visual.rotation.y = Math.atan2(dx, dz);
+    scene.add(visual);
+    troopAnimations.push({
+      visual,
+      start,
+      end,
+      startedAt: performance.now(),
+      duration: kind === 'battle' ? 520 : 700,
+      kind,
+    });
+  }
+
+  function updateTroopAnimations(now) {
+    for (let i = troopAnimations.length - 1; i >= 0; i--) {
+      const a = troopAnimations[i];
+      const raw = Math.min(1, Math.max(0, (now - a.startedAt) / a.duration));
+      const t = raw * raw * (3 - 2 * raw);
+      a.visual.position.lerpVectors(a.start, a.end, t);
+      a.visual.position.y += Math.sin(raw * Math.PI) * (a.kind === 'battle' ? .34 : .22);
+      const bob = Math.sin(raw * Math.PI * 8) * .025;
+      a.visual.position.y += bob;
+      if (raw >= 1) {
+        scene.remove(a.visual);
+        disposeObject3D(a.visual);
+        troopAnimations.splice(i, 1);
+      }
+    }
+  }
+
+  function makeTileBase(color = 0x6e685c, opacity = 1) {
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: .9, transparent: opacity < 1, opacity });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(TILE, .14, TILE), mat);
+    mesh.position.y = .01;
+    mesh.receiveShadow = true;
+    mesh.castShadow = opacity >= .9;
+    return mesh;
+  }
+
+  function makeRoadGroup(orientation = 'v', owner = 0, ghost = false) {
+    const group = new THREE.Group();
+    const base = makeTileBase(ghost ? 0x5c6d63 : 0x716b5f, ghost ? .42 : 1);
+    group.add(base);
+    const roadMat = new THREE.MeshStandardMaterial({ color: 0xd7c7a2, roughness: .82, transparent: ghost, opacity: ghost ? .7 : 1 });
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(ROAD_WIDTH, .04, TILE + .03), roadMat);
+    strip.position.y = .11;
+    strip.castShadow = !ghost;
+    group.add(strip);
+    if (orientation === 'h') group.rotation.y = Math.PI / 2;
+
+    if (owner && !ghost) {
+      const token = new THREE.Mesh(
+        new THREE.CylinderGeometry(.105, .105, .045, 20),
+        new THREE.MeshStandardMaterial({ color: PLAYER_COLORS[owner], roughness: .55 })
+      );
+      token.position.set(.48, .16, .48);
+      token.castShadow = true;
+      group.add(token);
+    }
+    return group;
+  }
+
+  function makeFortBody(group, color, ghost = false, big = false) {
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: .78, transparent: ghost, opacity: ghost ? .55 : 1 });
+    const s = big ? 1.08 : .86;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(.72*s, .42*s, .72*s), mat);
+    body.position.y = .34*s;
+    body.castShadow = !ghost;
+    group.add(body);
+    const tg = new THREE.CylinderGeometry(.13*s, .16*s, .54*s, 10);
+    for (const [x,z] of [[-.30,-.30],[.30,-.30],[-.30,.30],[.30,.30]]) {
+      const t = new THREE.Mesh(tg, mat);
+      t.position.set(x*s, .43*s, z*s);
+      t.castShadow = !ghost;
+      group.add(t);
+    }
+  }
+
+  function makeNodeCellGroup(type, owner, label, ghost = false) {
+    const group = new THREE.Group();
+    const baseColor = type === 'rome' ? 0x8e7444 : (owner ? PLAYER_COLORS[owner] : 0x6f7781);
+    group.add(makeTileBase(baseColor, ghost ? .42 : 1));
+
+    const roadMat = new THREE.MeshStandardMaterial({ color: 0xd8c7a0, roughness: .84, transparent: ghost, opacity: ghost ? .65 : 1 });
+    const h = new THREE.Mesh(new THREE.BoxGeometry(TILE + .02, .035, ROAD_WIDTH), roadMat);
+    const v = new THREE.Mesh(new THREE.BoxGeometry(ROAD_WIDTH, .035, TILE + .02), roadMat);
+    h.position.y = v.position.y = .105;
+    group.add(h, v);
+    makeFortBody(group, type === 'rome' ? 0xd8b66d : (owner ? PLAYER_COLORS[owner] : 0xb9c1c8), ghost, type === 'home' || type === 'rome');
+    if (label && !ghost) {
+      const spr = makeLabel(label);
+      spr.position.set(0, 1.03, 0);
+      spr.userData.nodeLabel = true;
+      group.add(spr);
+    }
+    return group;
+  }
+
+  function addInteractive(group, data) {
+    group.traverse(obj => {
+      if (obj.isMesh || obj.isSprite) {
+        Object.assign(obj.userData, data);
+        sceneInteractive.push(obj);
+      }
+    });
+  }
+
+  function removeInteractiveFor(group) {
+    group.traverse(obj => {
+      const i = sceneInteractive.indexOf(obj);
+      if (i >= 0) sceneInteractive.splice(i, 1);
+    });
+  }
+
+  function placeRoad(gx, gz, orientation, owner = 0, fixed = false) {
+    const id = `road-${nextRoadId++}`;
+    const group = makeRoadGroup(orientation, owner, false);
+    const p = world(gx, gz);
+    group.position.copy(p);
+    scene.add(group);
+    const r = { id, gx, gz, orientation, owner, fixed, group };
+    roadPieces.set(id, r);
+    cellMap.set(k(gx,gz), { kind: 'road', id });
+    addInteractive(group, { kind: 'road', roadId: id });
+    syncTroopVisual(id);
+    updateRoadCompletionStatus();
+    return r;
+  }
+
+  function updateNodeVisual(node) {
+    for (const g of node.groups) {
+      const base = g.children[0];
+      if (base?.material?.color) base.material.color.setHex(node.type === 'rome' ? (node.owner ? PLAYER_COLORS[node.owner] : 0x8e7444) : PLAYER_COLORS[node.owner]);
+      for (const child of [...g.children]) {
+        if (child.userData?.nodeLabel) {
+          g.remove(child);
+          child.material?.map?.dispose?.();
+          child.material?.dispose?.();
+        }
+      }
+    }
+    const labelGroup = node.groups[0];
+    const prefix = node.type === 'rome' ? 'ROMA' : (node.type === 'home' ? `P${node.owner} ANA KALE` : 'KALE');
+    const capText = Number.isFinite(nodeCapacity(node)) ? `${node.armies}/${nodeCapacity(node)}` : `${node.armies}`;
+    const levelText = node.type === 'rome' ? '' : ` L${node.level}`;
+    const spr = makeLabel(`${prefix}${levelText} • ${capText}`);
+    spr.position.set(node.type === 'rome' ? CELL * .5 : 0, 1.08, node.type === 'rome' ? CELL * .5 : 0);
+    spr.userData.nodeLabel = true;
+    labelGroup.add(spr);
+  }
+
+  function createNode(id, type, owner, armies, cells, fixed = false) {
+    const node = { id, type, owner, armies, cells, fixed, level: 1, groups: [] };
+    nodes.set(id, node);
+    cells.forEach((cell, index) => {
+      const label = type === 'rome' ? (index === 0 ? 'ROMA' : '') : (index === 0 ? (type === 'home' ? `P${owner}` : 'KALE') : '');
+      const g = makeNodeCellGroup(type, owner, label, false);
+      const p = world(cell.gx, cell.gz);
+      g.position.copy(p);
+      scene.add(g);
+      node.groups.push(g);
+      cellMap.set(k(cell.gx,cell.gz), { kind: 'node', id });
+      addInteractive(g, { kind: 'node', nodeId: id });
+    });
+    updateNodeVisual(node);
+    updateRoadCompletionStatus();
+    return node;
+  }
+
+  function destroyRoad(id) {
+    const r = roadPieces.get(id);
+    if (!r) return;
+    cellMap.delete(k(r.gx,r.gz));
+    removeInteractiveFor(r.group);
+    scene.remove(r.group);
+    roadPieces.delete(id);
+    troopGroups.delete(id);
+    updateRoadCompletionStatus();
+  }
+
+  function createFortAt(gx, gz, owner, armies = 1) {
+    const id = `fort-${nextFortId++}`;
+    return createNode(id, 'fort', owner, armies, [{gx,gz}], false);
+  }
+
+  function destroyNode(id) {
+    const node = nodes.get(id);
+    if (!node || node.fixed) return;
+    for (const cell of node.cells) cellMap.delete(k(cell.gx,cell.gz));
+    for (const g of node.groups) {
+      removeInteractiveFor(g);
+      scene.remove(g);
+    }
+    nodes.delete(id);
+    updateRoadCompletionStatus();
+  }
+
+  function roadConnects(r, dirIndex) {
+    if (!r) return false;
+    return r.orientation === 'v' ? (dirIndex === 0 || dirIndex === 2) : (dirIndex === 1 || dirIndex === 3);
+  }
+
+  function contentAt(gx, gz) {
+    const c = cellMap.get(k(gx,gz));
+    if (!c) return null;
+    return c.kind === 'road' ? roadPieces.get(c.id) : nodes.get(c.id);
+  }
+
+  function nodeAt(gx, gz) {
+    const c = cellMap.get(k(gx,gz));
+    return c?.kind === 'node' ? nodes.get(c.id) : null;
+  }
+
+  function roadAt(gx, gz) {
+    const c = cellMap.get(k(gx,gz));
+    return c?.kind === 'road' ? roadPieces.get(c.id) : null;
+  }
+
+  function roadRoadCompatible(orientation, gx, gz, dirIndex, neighbor) {
+    const mine = orientation === 'v' ? (dirIndex === 0 || dirIndex === 2) : (dirIndex === 1 || dirIndex === 3);
+    const theirs = roadConnects(neighbor, DIRS[dirIndex].opp);
+    if (mine !== theirs) return { valid: false, match: false };
+    return { valid: true, match: mine && theirs };
+  }
+
+  function adjacentRoadConnectionsForNode(node) {
+    const results = [];
+    for (const cell of node.cells) {
+      for (let i=0;i<4;i++) {
+        const d = DIRS[i];
+        const nr = roadAt(cell.gx + d.dx, cell.gz + d.dz);
+        if (nr && roadConnects(nr, d.opp)) results.push({ road: nr, fromCell: cell, dir: i });
+      }
+    }
+    re
