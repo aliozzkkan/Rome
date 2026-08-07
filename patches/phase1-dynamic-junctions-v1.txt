@@ -8,15 +8,14 @@
     const c = cellMap.get(k(r.gx + d.dx, r.gz + d.dz));
     if (!c || c.kind !== 'node') return null;
     const n = nodes.get(c.id);
-    if (!n) return null;
-    if (!['fort','home','rome'].includes(n.type)) return null;
+    if (!n || !['fort','home','rome'].includes(n.type)) return null;
     return n;
   }
 
   roadConnects = function(r, dirIndex) {
     if (!r) return false;
     if (baseDynamicRoadConnects(r, dirIndex)) return true;
-    // A straight road automatically opens a side spur when a castle is directly beside it.
+    // A straight road becomes a real logical T/+ junction when a castle is beside it.
     return !!junctionNodeBesideRoad(r, dirIndex);
   };
 
@@ -32,27 +31,32 @@
 
   function makeAutoJunctionBranch(r, dirIndex) {
     const mat = new THREE.MeshStandardMaterial({ color: 0xd7c7a2, roughness: .82 });
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(TILE * .54, .045, ROAD_WIDTH), mat);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(TILE * .56, .045, ROAD_WIDTH), mat);
     mesh.position.y = .135;
-    // The road group is rotated 90° for horizontal roads. Local X is therefore
-    // east/west for vertical roads and north/south for horizontal roads.
     let sign = 1;
     if (r.orientation === 'v') sign = dirIndex === 1 ? 1 : -1; // east / west
-    else sign = dirIndex === 0 ? 1 : -1; // north / south after group rotation
+    else sign = dirIndex === 0 ? 1 : -1; // north / south after 90° group rotation
     mesh.position.x = sign * TILE * .27;
     mesh.castShadow = true;
     mesh.userData.autoJunctionBranch = true;
     r.group.add(mesh);
   }
 
+  function junctionSignature(r) {
+    const baseDirs = r.orientation === 'v' ? new Set([0,2]) : new Set([1,3]);
+    const extras = [];
+    for (let i=0;i<4;i++) if (!baseDirs.has(i) && junctionNodeBesideRoad(r,i)) extras.push(i);
+    return extras.join(',');
+  }
+
   function refreshAutomaticJunctions() {
     for (const r of roadPieces.values()) {
+      const sig = junctionSignature(r);
+      if (r._autoJunctionSignature === sig) continue;
+      r._autoJunctionSignature = sig;
       clearAutoJunctionVisuals(r);
-      const baseDirs = r.orientation === 'v' ? new Set([0,2]) : new Set([1,3]);
-      for (let i=0;i<4;i++) {
-        if (baseDirs.has(i)) continue;
-        if (junctionNodeBesideRoad(r,i)) makeAutoJunctionBranch(r,i);
-      }
+      if (!sig) continue;
+      for (const dir of sig.split(',').filter(Boolean).map(Number)) makeAutoJunctionBranch(r,dir);
     }
   }
 
@@ -63,6 +67,7 @@
     return result;
   };
 
+  // Cheap check only; actual meshes are rebuilt only when the junction signature changes.
   const baseDynamicRenderAll = renderAll;
   renderAll = function(...args) {
     const result = baseDynamicRenderAll.apply(this,args);
