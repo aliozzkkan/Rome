@@ -1,0 +1,328 @@
+function renderTop() {
+    roundValueEl.textContent = game.round;
+    deckValueEl.textContent = `${game.deck.length}/${TOTAL_CARDS}`;
+    const rome = getRome();
+    romeOwnerValueEl.textContent = ownerName(rome.owner);
+    romeOwnerValueEl.style.color = rome.owner ? PLAYER_CSS[rome.owner] : '#e4cc94';
+    currentPlayerNameEl.textContent = PLAYER_NAMES[game.current];
+    currentPlayerNameEl.style.color = PLAYER_CSS[game.current];
+    currentPlayerBoxEl.style.borderColor = PLAYER_CSS[game.current] + '88';
+    actionsTextEl.textContent = game.phase === 'refill' ? `Kart al ${currentPlayer().hand.length}/7` : (game.phase === 'discard' ? '1 kart at' : `Kart ${game.cardsPlayedThisTurn}/${MAX_CARDS_PER_TURN}`);
+    finalChipEl.classList.toggle('urgent', game.finalRoundActive);
+    finalLabelEl.textContent = game.finalRoundActive ? 'FINAL' : 'Iskarta';
+    finalValueEl.textContent = game.finalRoundActive ? 'AKTİF' : allDiscardCount();
+    endTurnBtn.textContent = game.phase === 'discard' ? 'Elinden 1 Kart Seç' : '1 Kart At & Turu Bitir';
+    endTurnBtn.disabled = game.gameOver || game.phase === 'refill' || currentPlayer().isBot || game.botBusy;
+    moveBtn.disabled = game.gameOver || currentPlayer().isBot || game.botBusy || game.phase !== 'play' || ![...troopGroups.entries()].some(([id,g]) => g.owner === game.current && g.ready > 0 && adjacentLocations(id).size > 0);
+  }
+
+  function renderSelectionInfo() {
+    const locId = game.selectedLocationId || game.selectedNodeId;
+    if (!locId) { selectedInfoEl.textContent = 'Seçili bölge: —'; return; }
+    const g = troopGroup(locId);
+    const node = nodes.get(locId);
+    const extra = node ? ` · kontrol ${ownerName(node.owner)} · savunma +${defenseBonus(node)}${node.type !== 'rome' ? ` · L${node.level} · kapasite ${troopTotal(node.id)}/${nodeCapacity(node)}` : ''}` : (roadPieces.get(locId)?.completed ? ' · yol TAMAM' : ' · yol İNŞAAT');
+    selectedInfoEl.textContent = `Seçili: ${locationLabel(locId)} · lejyon ${g ? g.ready + g.spent : 0}${g?.owner ? ` (P${g.owner})` : ''}${g?.owner === game.current ? ` · bu tur hareket edebilir ${g.ready}` : ''}${extra}`;
+  }
+
+  function renderAll() {
+    renderTop();
+    renderPlayers();
+    renderHand();
+    renderWorkbench();
+    renderSelectionInfo();
+    updateNodeHighlights();
+  }
+
+  function setModeText(text) { modeTextEl.textContent = text; }
+
+  function resetInteractionMode() {
+    game.selectedCardId = null;
+    game.selectedNodeId = null;
+    game.selectedLocationId = null;
+    game.reachable.clear();
+    game.mode = 'idle';
+    clearPreview();
+    moveBtn.classList.remove('active');
+    if (game.phase === 'refill') setModeText('Elini 7 karta tamamlamak için desteden veya önceki oyuncunun açık ıskartasından kart al.');
+    else if (game.phase === 'discard') setModeText('Turu kapatmak için elinden 1 kart seçip at.');
+    else if (currentPlayer().isBot) setModeText(`${PLAYER_NAMES[game.current]} geçerli hamleler arasından rastgele oynuyor…`);
+    else setModeText(`Kartı elinden sahaya sürükle · ${game.cardsPlayedThisTurn}/${MAX_CARDS_PER_TURN} kart oynandı. Hazır lejyonu bulunduğu karttan komşu karta sürükle. Turu bitirmek için 1 kartı ıskartaya bırak.`);
+    renderAll();
+  }
+
+  function selectCard(cardId) {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return;
+    if (!canPlayAnotherCard()) { toast('Bu tur en fazla 3 kart oynayabilirsin.', false); return; }
+    const p = currentPlayer();
+    const c = p.hand.find(x => x.id === cardId);
+    if (!c || REACTION_CARD_TYPES.has(c.type)) return;
+    if (p.hand.length <= 1) {
+      toast('Turu bitirmek için en az 1 kartı elinde bırakmalısın.', false);
+      return;
+    }
+    if (c.type === 'legion') {
+      game.selectedCardId = cardId;
+      playLegion();
+      return;
+    }
+    if (c.type === 'reinforcement') {
+      if (game.cardsPlayedThisTurn > MAX_CARDS_PER_TURN - 2) { toast('Takviye için bu tur en az 2 kart oynama hakkı kalmalı.', false); return; }
+      game.selectedCardId = cardId;
+      playReinforcement();
+      return;
+    }
+    game.selectedCardId = cardId;
+    game.selectedNodeId = null;
+    game.selectedLocationId = null;
+    game.reachable.clear();
+    game.mode = `play-${c.type}`;
+    moveBtn.classList.remove('active');
+    clearPreview();
+    if (c.type === 'road') setModeText('YOL: Mevcut ağın ucuna tıkla. Düz yol yatay/dikey yönünü otomatik seçer. Bir turda toplam en fazla 3 kart oynayabilirsin.');
+    if (c.type === 'fort') setModeText('KALE: Yol üstüne/ucuna yeni kale kur veya kendi kalenin üstüne bırakıp level artır. Her level +1 savunma ve +3 kapasite.');
+    renderAll();
+  }
+
+  function consumeSelectedCard(playCost = 1) {
+    const p = currentPlayer();
+    const idx = p.hand.findIndex(c => c.id === game.selectedCardId);
+    if (idx < 0) return null;
+    const [c] = p.hand.splice(idx,1);
+    game.spentPile.push(c);
+    game.selectedCardId = null;
+    game.cardsPlayedThisTurn += playCost;
+    return c;
+  }
+
+  function spendAction() {
+    // Bu sürümde sabit aksiyon puanı yok. Kartlar serbestçe oynanır;
+    // lejyon hareketi ise lejyon başına turda 1 kez ile sınırlıdır.
+  }
+
+  function playRoad(candidate) {
+    if (!candidate || game.phase !== 'play') return;
+    if (!canPlayAnotherCard()) { toast('Bu tur 3 kart sınırına ulaştın.', false); return; }
+    if (currentPlayer().hand.length <= 1) { toast('Son kartını oynamazsın; tur sonunda 1 kart atmalısın.', false); return; }
+    const c = currentPlayer().hand.find(x => x.id === game.selectedCardId && x.type === 'road');
+    if (!c) return;
+    placeRoad(candidate.gx,candidate.gz,candidate.orientation,game.current,false);
+    consumeSelectedCard();
+    addLog(`bir yol inşa etti (${candidate.orientation === 'v' ? 'dikey' : 'yatay'}).`, PLAYER_NAMES[game.current]);
+    toast('Yol otomatik olarak bağlandı.');
+    resetInteractionMode();
+  }
+
+  function playFort(candidate) {
+    if (!candidate || game.phase !== 'play') return;
+    if (!canPlayAnotherCard()) { toast('Bu tur 3 kart sınırına ulaştın.', false); return; }
+    if (currentPlayer().hand.length <= 1) { toast('Son kartını oynamazsın; tur sonunda 1 kart atmalısın.', false); return; }
+    const c = currentPlayer().hand.find(x => x.id === game.selectedCardId && x.type === 'fort');
+    if (!c) return;
+    if (candidate.upgradeNodeId) {
+      const node = nodes.get(candidate.upgradeNodeId);
+      if (!node || node.owner !== game.current || (node.type !== 'fort' && node.type !== 'home')) return;
+      node.level = (node.level || 1) + 1;
+      consumeSelectedCard();
+      updateNodeVisual(node);
+      addLog(`${locationLabel(node.id)} seviyesini L${node.level} yaptı: savunma +${node.level}, kapasite ${nodeCapacity(node)}.`, PLAYER_NAMES[game.current]);
+      toast(`Kale L${node.level}! Savunma +${node.level} · Kapasite ${nodeCapacity(node)}`);
+      resetInteractionMode();
+      return;
+    }
+    let carried = null;
+    if (candidate.upgradeRoadId) {
+      const old = troopGroups.get(candidate.upgradeRoadId);
+      if (old) carried = { ...old };
+      destroyRoad(candidate.upgradeRoadId);
+    }
+    const fort = createFortAt(candidate.gx,candidate.gz,game.current,0);
+    if (carried) setTroops(fort.id, carried.owner, carried.ready, carried.spent);
+    else syncTroopVisual(fort.id);
+    consumeSelectedCard();
+    updateRoadCompletionStatus();
+    addLog(candidate.upgradeRoadId ? 'bir yolu L1 kaleye çevirdi; bağlı yol segmentleri yeniden kontrol edildi.' : 'yol ucuna L1 kale kurdu; tamamlanan yol segmentleri aktif oldu.', PLAYER_NAMES[game.current]);
+    toast('Kale kuruldu. İki ucu kaleye/Roma’ya bağlanan yollar artık asker hareketine açılır.');
+    resetInteractionMode();
+  }
+
+  function playLegion() {
+    if (game.phase !== 'play') return;
+    if (!canPlayAnotherCard()) { toast('Bu tur 3 kart sınırına ulaştın.', false); return; }
+    if (currentPlayer().hand.length <= 1) { toast('Son kartını oynamazsın; tur sonunda 1 kart atmalısın.', false); return; }
+    const c = currentPlayer().hand.find(x => x.id === game.selectedCardId && x.type === 'legion');
+    if (!c) return;
+    const homeId = `home-${game.current}`;
+    if (freeCapacity(homeId, game.current) < 1) { toast(`Ana kale dolu (${troopTotal(homeId)}/${locationCapacity(homeId)}). Asker çıkarabilmek için birlik hareket ettir veya kaleyi yükselt.`, false); game.selectedCardId = null; renderAll(); return; }
+    addTroops(homeId, game.current, 0, 1);
+    consumeSelectedCard();
+    addLog('ana kalede +1 lejyon çıkardı. Bu lejyon gelecek turdan itibaren hareket edebilir.', PLAYER_NAMES[game.current]);
+    toast('Lejyon ana kalede doğdu. Bu tur bekleyecek.');
+    resetInteractionMode();
+  }
+
+
+  function playReinforcement() {
+    if (game.phase !== 'play') return;
+    if (game.cardsPlayedThisTurn > MAX_CARDS_PER_TURN - 2) { toast('Takviye 2 kart oynama hakkı harcar; bu tur yeterli hakkın kalmadı.', false); return; }
+    if (currentPlayer().hand.length <= 1) { toast('Son kartını oynamazsın; tur sonunda 1 kart atmalısın.', false); return; }
+    const c = currentPlayer().hand.find(x => x.id === game.selectedCardId && x.type === 'reinforcement');
+    if (!c) return;
+    const homeId = `home-${game.current}`;
+    if (freeCapacity(homeId, game.current) < 2) { toast(`Ana kalede +2 birlik için yer yok (${troopTotal(homeId)}/${locationCapacity(homeId)}).`, false); game.selectedCardId = null; renderAll(); return; }
+    addTroops(homeId, game.current, 0, 2);
+    consumeSelectedCard(2);
+    addLog('ana kaleye +2 takviye lejyon çıkardı (2 kart hakkı). Bu birlikler gelecek tur hareket edebilir.', PLAYER_NAMES[game.current]);
+    toast('+2 takviye ana kalede hazırlandı.');
+    resetInteractionMode();
+  }
+
+  function startMoveMode() {
+    if (game.gameOver || game.phase !== 'play') return;
+    const movable = [...troopGroups.entries()].some(([,g]) => g.owner === game.current && g.ready > 0);
+    if (!movable) { toast('Bu tur hareket edebilecek lejyonun yok.', false); return; }
+    game.selectedCardId = null;
+    game.selectedNodeId = null;
+    game.selectedLocationId = null;
+    game.reachable.clear();
+    game.mode = 'move-source';
+    clearPreview();
+    moveBtn.classList.add('active');
+    setModeText('ORDU HAREKETİ: Yalnız TAMAMLANMIŞ yol segmentlerinde hareket edebilirsin. İki ucu Kale/Ana Kale/Roma ile kapanmayan yol inşaat halindedir.');
+    renderAll();
+  }
+
+  function chooseMoveSource(locationId) {
+    const g = troopGroup(locationId);
+    if (!g || g.owner !== game.current || g.ready < 1) {
+      toast('Burada bu tur hareket edebilecek lejyonun yok.', false);
+      return;
+    }
+    game.selectedLocationId = locationId;
+    game.selectedNodeId = nodes.has(locationId) ? locationId : null;
+    game.reachable = adjacentLocations(locationId);
+    if (!game.reachable.size) {
+      toast('Buradan aktif tamamlanmış bir yol çıkmıyor. Önce yolun diğer ucunu Kale veya Roma’ya bağla.', false);
+      return;
+    }
+    game.mode = 'move-target';
+    setModeText(`Hedef seç: tamamlanmış yol üzerinde 1 kart ilerle. Bu noktada ${g.ready} lejyon hareket edebilir; hepsini veya bir kısmını gönderebilirsin.`);
+    renderAll();
+  }
+
+  function openMoveModal(sourceId, targetId) {
+    const sg = troopGroup(sourceId);
+    if (!sg) return;
+    let max = sg.ready;
+    const targetNode = nodes.get(targetId);
+    if (targetNode && (!troopGroup(targetId) || troopGroup(targetId)?.owner === game.current)) max = Math.min(max, freeCapacity(targetId, game.current));
+    if (max < 1) { toast(`${locationLabel(targetId)} dolu. Kaleyi yükselt veya içerideki askerleri hareket ettir.`, false); return; }
+    modalEl.innerHTML = `
+      <h3>Lejyonları 1 kart ilerlet</h3>
+      <p>${locationLabel(sourceId)} → ${locationLabel(targetId)}. Yalnız tamamlanmış yol üzerinde hareket edilir. Hareket eden lejyonlar bu tur tekrar hareket edemez.</p>
+      <div class="modalRow"><span>Kaç lejyon?</span><input id="moveRange" type="range" min="1" max="${max}" value="${max}"><strong id="moveCount">${max}</strong></div>
+      <div class="modalActions"><button id="modalCancel">İptal</button><button id="modalConfirm" class="primary">1 Kart İlerle</button></div>
+    `;
+    modalShade.classList.add('show');
+    const range = document.getElementById('moveRange');
+    const count = document.getElementById('moveCount');
+    range.addEventListener('input', () => count.textContent = range.value);
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+    document.getElementById('modalConfirm').addEventListener('click', () => {
+      const n = Number(range.value);
+      moveFriendlyTroops(sourceId,targetId,n);
+      closeModal(); resetInteractionMode();
+    });
+  }
+
+  function removeOneSupportCard(playerId, type, countForCurrentTurn = false) {
+    const p = playerById(playerId);
+    const idx = p.hand.findIndex(c => c.type === type);
+    if (idx < 0) return false;
+    game.spentPile.push(...p.hand.splice(idx,1));
+    if (countForCurrentTurn && playerId === game.current) game.cardsPlayedThisTurn += 1;
+    return true;
+  }
+
+  function supportCount(playerId, type) {
+    const p = playerById(playerId);
+    if (!p) return 0;
+    const n = p.hand.filter(c => c.type === type).length;
+    if (playerId === game.current && (p.hand.length <= 1 || !canPlayAnotherCard())) return 0;
+    return n;
+  }
+
+  function supportPower(type, side, targetNode) {
+    if (!type || type === 'none') return 0;
+    if (type === 'tactic') return 2;
+    if (type === 'shield' && side === 'def') return 3;
+    if (type === 'siege' && side === 'atk' && targetNode && (targetNode.type === 'fort' || targetNode.type === 'rome')) return 3;
+    return 0;
+  }
+
+  function openBattleModal(sourceId, targetId) {
+    const sg = troopGroup(sourceId);
+    if (!sg) return;
+    const max = sg.ready;
+    const tg = troopGroup(targetId);
+    const defenderOwner = tg?.owner || nodes.get(targetId)?.owner || 0;
+    const node = nodes.get(targetId);
+    const defBonus = node ? defenseBonus(node) : 0;
+    const atkT = supportCount(game.current, 'tactic');
+    const atkS = node && (node.type === 'fort' || node.type === 'rome') ? supportCount(game.current, 'siege') : 0;
+    const defT = defenderOwner ? supportCount(defenderOwner, 'tactic') : 0;
+    const defS = defenderOwner ? supportCount(defenderOwner, 'shield') : 0;
+    modalEl.innerHTML = `
+      <h3>⚔️ Savaş: ${locationLabel(targetId)}</h3>
+      <p>Saldıran yalnızca komşu karta geçer. Kale +1, ana kale +2, Roma +2 savunma verir. Her taraf en fazla 1 savaş destek kartı kullanabilir. Eşitlik savunana gider.</p>
+      <div class="modalRow"><span>Gönderilecek lejyon</span><input id="attackRange" type="range" min="1" max="${max}" value="${max}"><strong id="attackCount">${max}</strong></div>
+      <div class="modalRow"><label for="atkSupport">Saldırı desteği</label><select id="atkSupport" style="max-width:250px"><option value="none">Yok</option>${atkT ? `<option value="tactic">🦅 Taktik +2 (${atkT})</option>` : ''}${atkS ? `<option value="siege">🧨 Kuşatma +3 (${atkS})</option>` : ''}</select></div>
+      <div class="modalRow"><label for="defSupport">Savunma desteği</label><select id="defSupport" style="max-width:250px"><option value="none">Yok</option>${defT ? `<option value="tactic">🦅 Taktik +2 (${defT})</option>` : ''}${defS ? `<option value="shield">🛡️ Kalkan +3 (${defS})</option>` : ''}</select></div>
+      <div class="modalRow"><span>Savunan</span><strong>${tg ? tg.ready + tg.spent : 0} lejyon + ${defBonus} savunma</strong></div>
+      <div class="modalActions"><button id="modalCancel">İptal</button><button id="modalConfirm" class="primary">Savaşı Çöz</button></div>
+    `;
+    modalShade.classList.add('show');
+    const range = document.getElementById('attackRange');
+    const count = document.getElementById('attackCount');
+    range.addEventListener('input', () => count.textContent = range.value);
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+    document.getElementById('modalConfirm').addEventListener('click', () => {
+      resolveBattle(sourceId,targetId,Number(range.value),document.getElementById('atkSupport').value,document.getElementById('defSupport').value);
+      closeModal(); resetInteractionMode();
+    });
+  }
+
+  function stealRandomCard(fromPlayerId, toPlayerId) {
+    const from = playerById(fromPlayerId);
+    const to = playerById(toPlayerId);
+    if (!from || !to || !from.hand.length) return null;
+    const idx = Math.floor(Math.random() * from.hand.length);
+    const [stolen] = from.hand.splice(idx,1);
+    to.hand.push(stolen);
+    return stolen;
+  }
+
+  function resolveBattle(sourceId,targetId,committed,atkSupport = 'none',defSupport = 'none') {
+    const attacker = game.current;
+    const sourceGroup = troopGroup(sourceId);
+    const targetGroup = troopGroup(targetId);
+    const targetNode = nodes.get(targetId);
+    if (!sourceGroup || sourceGroup.owner !== attacker || sourceGroup.ready < committed) return;
+    const defenderOwner = targetGroup?.owner || targetNode?.owner || 0;
+    const atkSupportPower = supportPower(atkSupport, 'atk', targetNode);
+    const defSupportPower = supportPower(defSupport, 'def', targetNode);
+    if (atkSupportPower && atkSupport !== 'none') removeOneSupportCard(attacker, atkSupport, true);
+    if (defSupportPower && defSupport !== 'none' && defenderOwner) removeOneSupportCard(defenderOwner, defSupport, false);
+
+    const defenderLegions = targetGroup ? targetGroup.ready + targetGroup.spent : 0;
+    const atkPower = committed + atkSupportPower;
+    const defPower = defenderLegions + (targetNode ? defenseBonus(targetNode) : 0) + defSupportPower;
+    removeTroops(sourceId, committed, 0);
+    animateTroopMarch(attacker, committed, sourceId, targetId, 'battle');
+
+    if (atkPower > defPower) {
+      const casualties = Math.floor(defenderLegions / 2);
+      const survivors = Math.max(1, committed - casualties);
+      troopGroups.delete(targetId);
+      if (targetNode?.type === 'home') {
+     
