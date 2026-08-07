@@ -1,0 +1,428 @@
+    // Ana kale ele geçirilemez; baskın sonrası sağ kalanlar geldiği karta döner ve bu tur harcanmış sayılır.
+        addTroops(sourceId, attacker, 0, survivors);
+        const homeRemain = Math.max(1, Math.ceil(defenderLegions / 2));
+        setTroops(targetId, targetNode.owner, homeRemain, 0);
+        const stolen = stealRandomCard(targetNode.owner, attacker);
+        addLog(`ana kaleyi bastı; ${stolen ? '1 kart ganimet aldı' : 'ganimet bulamadı'}.`, PLAYER_NAMES[attacker]);
+        toast('Baskın başarılı! Ana kale ele geçirilemez.');
+      } else {
+        let stationed = survivors;
+        let overflow = 0;
+        if (targetNode && Number.isFinite(nodeCapacity(targetNode))) {
+          stationed = Math.min(survivors, nodeCapacity(targetNode));
+          overflow = survivors - stationed;
+        }
+        setTroops(targetId, attacker, 0, stationed);
+        if (overflow > 0) addTroops(sourceId, attacker, 0, overflow);
+        if (targetNode) {
+          targetNode.owner = attacker;
+          syncTroopVisual(targetId);
+          if (targetId === 'rome') {
+            addLog('ROMA’YI ELE GEÇİRDİ!', PLAYER_NAMES[attacker]);
+            toast('ROMA SENİN!');
+          } else {
+            addLog('bir kaleyi ele geçirdi.', PLAYER_NAMES[attacker]);
+            toast('Kale ele geçirildi.');
+          }
+        } else {
+          addLog('yoldaki düşman lejyonlarını yendi ve karta ilerledi.', PLAYER_NAMES[attacker]);
+          toast('Yol savaşı kazanıldı.');
+        }
+      }
+    } else {
+      const defenderLoss = Math.min(defenderLegions, Math.floor(committed / 2));
+      if (targetGroup) {
+        const remain = Math.max(targetNode?.type === 'home' ? 1 : 0, defenderLegions - defenderLoss);
+        if (remain) setTroops(targetId, targetGroup.owner, remain, 0); else troopGroups.delete(targetId);
+      }
+      addLog(`saldırıda durduruldu (${atkPower} vs ${defPower}).`, PLAYER_NAMES[attacker]);
+      toast('Savunma saldırıyı durdurdu.', false);
+    }
+    syncTroopVisual(sourceId);
+    syncTroopVisual(targetId);
+  }
+
+  function closeModal() {
+    modalShade.classList.remove('show');
+    modalEl.innerHTML = '';
+  }
+
+  function moveFriendlyTroops(sourceId,targetId,n) {
+    const sg = troopGroup(sourceId);
+    if (!sg || sg.owner !== game.current || sg.ready < n) return;
+    if (!adjacentLocations(sourceId).has(targetId)) { toast('Bu hareket için tamamlanmış yol bağlantısı yok.', false); return; }
+    const movingOwner = sg.owner;
+    const node = nodes.get(targetId);
+    if (node && (!troopGroup(targetId) || troopGroup(targetId)?.owner === movingOwner)) {
+      const free = freeCapacity(targetId, movingOwner);
+      if (free < n) { toast(`${locationLabel(targetId)} kapasitesi yetersiz. Boş yer: ${free}.`, false); return; }
+    }
+    removeTroops(sourceId,n,0);
+    animateTroopMarch(movingOwner, n, sourceId, targetId, 'move');
+    const existing = troopGroup(targetId);
+    if (existing && existing.owner === game.current) addTroops(targetId,game.current,0,n);
+    else setTroops(targetId,game.current,0,n);
+    if (node && node.type !== 'home' && (node.owner === 0 || node.owner === game.current)) {
+      node.owner = game.current;
+      syncTroopVisual(node.id);
+    }
+    addLog(`${n} lejyonu 1 kart ilerletti: ${locationLabel(sourceId)} → ${locationLabel(targetId)}.`, PLAYER_NAMES[game.current]);
+    toast(`${n} lejyon 1 kart ilerledi.`);
+  }
+
+  function chooseMoveTarget(targetId) {
+    const sourceId = game.selectedLocationId;
+    if (!sourceId || !game.reachable.has(targetId)) {
+      toast('Lejyon bu tur yalnızca komşu 1 karta ilerleyebilir.', false);
+      return;
+    }
+    const targetGroup = troopGroup(targetId);
+    const targetNode = nodes.get(targetId);
+    const hostileTroops = targetGroup && targetGroup.owner !== game.current;
+    const hostileControl = targetNode && targetNode.owner !== 0 && targetNode.owner !== game.current;
+    const neutralDefended = targetNode && targetNode.owner === 0 && troopTotal(targetId) > 0;
+    if (hostileTroops || hostileControl || neutralDefended) openBattleModal(sourceId,targetId);
+    else openMoveModal(sourceId,targetId);
+  }
+
+  function updateNodeHighlights() {
+    for (const node of nodes.values()) {
+      for (const g of node.groups) {
+        const isSelected = node.id === game.selectedLocationId || node.id === game.selectedNodeId;
+        const reachable = game.mode === 'move-target' && game.reachable.has(node.id);
+        const group = troopGroup(node.id);
+        const hostile = reachable && ((group && group.owner !== game.current) || (node.owner && node.owner !== game.current));
+        const friendly = reachable && !hostile;
+        g.scale.setScalar(isSelected ? 1.08 : (reachable ? 1.05 : 1));
+        const base = g.children[0];
+        if (base?.material?.emissive) {
+          base.material.emissive.setHex(friendly ? 0x143c25 : hostile ? 0x4a1719 : isSelected ? 0x443713 : 0x000000);
+          base.material.emissiveIntensity = reachable || isSelected ? .55 : 0;
+        }
+      }
+    }
+    for (const road of roadPieces.values()) {
+      const isSelected = road.id === game.selectedLocationId;
+      const reachable = game.mode === 'move-target' && game.reachable.has(road.id);
+      const group = troopGroup(road.id);
+      const hostile = reachable && group && group.owner !== game.current;
+      road.group.scale.setScalar(isSelected ? 1.08 : (reachable ? 1.05 : 1));
+      const base = road.group.children[0];
+      if (base?.material?.emissive) {
+        base.material.emissive.setHex(reachable ? (hostile ? 0x4a1719 : 0x143c25) : (isSelected ? 0x443713 : 0x000000));
+        base.material.emissiveIntensity = reachable || isSelected ? .55 : 0;
+      }
+    }
+  }
+
+  function randomChoice(arr) {
+    return arr.length ? arr[Math.floor(Math.random() * arr.length)] : null;
+  }
+
+  function randomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function allRoadCandidates(playerId) {
+    const out = [];
+    for (let gx = -10; gx <= 11; gx++) {
+      for (let gz = -10; gz <= 11; gz++) {
+        for (const orientation of ['v','h']) {
+          const cand = evaluateRoadPlacement(gx, gz, orientation, playerId);
+          if (cand) out.push(cand);
+        }
+      }
+    }
+    return out;
+  }
+
+  function allFortCandidates(playerId) {
+    const out = [];
+    for (let gx = -10; gx <= 11; gx++) {
+      for (let gz = -10; gz <= 11; gz++) {
+        const cand = evaluateFortPlacement(gx, gz, playerId);
+        if (cand) out.push(cand);
+      }
+    }
+    return out;
+  }
+
+  function botRefillOne(playerId) {
+    const p = playerById(playerId);
+    if (!p || p.hand.length >= 7 || game.finalRoundActive) return false;
+    if (!game.deck.length) recycleDiscardsIntoDeck();
+    const prev = playerById(previousPlayerId(playerId));
+    const choices = [];
+    if (game.deck.length) choices.push('deck');
+    if (prev?.discard.length) choices.push('discard');
+    const source = randomChoice(choices);
+    if (!source) return false;
+    if (source === 'discard') {
+      const idx = Math.floor(Math.random() * prev.discard.length);
+      const [c] = prev.discard.splice(idx, 1);
+      p.hand.push(c);
+      addLog(`${CARD_INFO[c.type].label} kartını önceki oyuncunun ıskartasından aldı.`, PLAYER_NAMES[playerId]);
+    } else {
+      const c = drawCardForPlayer(playerId);
+      if (c) addLog(`${CARD_INFO[c.type].label} kartını ana desteden aldı.`, PLAYER_NAMES[playerId]);
+    }
+    return true;
+  }
+
+  function botPlayableOptions(playerId) {
+    const p = playerById(playerId);
+    if (!p || p.hand.length <= 1 || !canPlayAnotherCard()) return [];
+    const options = [];
+    const hasRoad = p.hand.some(c => c.type === 'road');
+    const hasFort = p.hand.some(c => c.type === 'fort');
+    const homeId = `home-${playerId}`;
+    const hasLegion = p.hand.some(c => c.type === 'legion') && freeCapacity(homeId, playerId) >= 1;
+    const hasReinforcement = p.hand.some(c => c.type === 'reinforcement') && freeCapacity(homeId, playerId) >= 2;
+    if (hasRoad) {
+      const candidates = allRoadCandidates(playerId);
+      if (candidates.length) options.push({ type: 'road', candidates });
+    }
+    if (hasFort) {
+      const candidates = allFortCandidates(playerId);
+      if (candidates.length) options.push({ type: 'fort', candidates });
+    }
+    if (hasLegion) options.push({ type: 'legion', candidates: null });
+    if (hasReinforcement && game.cardsPlayedThisTurn <= MAX_CARDS_PER_TURN - 2) options.push({ type: 'reinforcement', candidates: null });
+    return options;
+  }
+
+  function botPlayRandomCard(playerId) {
+    const p = playerById(playerId);
+    const options = botPlayableOptions(playerId);
+    const option = randomChoice(options);
+    if (!option || !p) return false;
+    const cardObj = randomChoice(p.hand.filter(c => c.type === option.type));
+    if (!cardObj) return false;
+    game.selectedCardId = cardObj.id;
+    if (option.type === 'road') playRoad(randomChoice(option.candidates));
+    else if (option.type === 'fort') playFort(randomChoice(option.candidates));
+    else if (option.type === 'legion') playLegion();
+    else playReinforcement();
+    return true;
+  }
+
+  function botMoveOnce(playerId) {
+    const sources = [...troopGroups.entries()]
+      .filter(([,g]) => g.owner === playerId && g.ready > 0)
+      .map(([id]) => id)
+      .filter(id => adjacentLocations(id).size > 0);
+    const sourceId = randomChoice(sources);
+    if (!sourceId) return false;
+    const targets = [...adjacentLocations(sourceId)];
+    const targetId = randomChoice(targets);
+    if (!targetId) return false;
+    const sg = troopGroup(sourceId);
+    if (!sg?.ready) return false;
+    const n = randomInt(1, sg.ready);
+    const tg = troopGroup(targetId);
+    const targetNode = nodes.get(targetId);
+    const hostileTroops = tg && tg.owner !== playerId;
+    const hostileControl = targetNode && targetNode.owner !== 0 && targetNode.owner !== playerId;
+    const neutralDefended = targetNode && targetNode.owner === 0 && troopTotal(targetId) > 0;
+    if (hostileTroops || hostileControl || neutralDefended) {
+      const defenderOwner = tg?.owner || targetNode?.owner || 0;
+      const atkChoices = ['none'];
+      if (supportCount(playerId, 'tactic') > 0) atkChoices.push('tactic');
+      if (targetNode && (targetNode.type === 'fort' || targetNode.type === 'rome') && supportCount(playerId, 'siege') > 0) atkChoices.push('siege');
+      const defChoices = ['none'];
+      if (defenderOwner && isBotPlayer(defenderOwner) && supportCount(defenderOwner, 'tactic') > 0) defChoices.push('tactic');
+      if (defenderOwner && isBotPlayer(defenderOwner) && supportCount(defenderOwner, 'shield') > 0) defChoices.push('shield');
+      const atkSupport = Math.random() < .38 ? randomChoice(atkChoices) : 'none';
+      const defSupport = Math.random() < .30 ? randomChoice(defChoices) : 'none';
+      resolveBattle(sourceId, targetId, n, atkSupport, defSupport);
+    } else {
+      moveFriendlyTroops(sourceId, targetId, n);
+    }
+    return true;
+  }
+
+  function botDiscardAndFinish(playerId) {
+    const p = playerById(playerId);
+    if (!p?.hand.length) {
+      game.botBusy = false;
+      finalizeTurn();
+      return;
+    }
+    game.phase = 'discard';
+    const c = randomChoice(p.hand);
+    game.botBusy = false;
+    discardAndFinishTurn(c.id);
+  }
+
+  function scheduleBotTurn() {
+    if (!currentPlayer().isBot || game.gameOver) return;
+    game.botBusy = true;
+    setModeText(`${PLAYER_NAMES[game.current]} düşünüyor… (rastgele bot)`);
+    renderAll();
+    const botId = game.current;
+    setTimeout(() => runBotTurn(botId), 350);
+  }
+
+  async function runBotTurn(playerId) {
+    if (game.gameOver || game.current !== playerId || !isBotPlayer(playerId)) return;
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    while (currentPlayer().hand.length < 7 && !game.finalRoundActive && (game.deck.length || allDiscardCount())) {
+      botRefillOne(playerId);
+      renderAll();
+      await wait(180);
+      if (game.gameOver || game.current !== playerId) return;
+    }
+
+    if (currentPlayer().hand.length < 7 && !game.deck.length && allDiscardCount() === 0) activateFinalRound(playerId);
+    game.phase = 'play';
+    resetInteractionMode();
+    renderAll();
+    await wait(220);
+
+    const desiredPlays = randomInt(1, MAX_CARDS_PER_TURN);
+    for (let i = 0; i < desiredPlays; i++) {
+      if (!canPlayAnotherCard() || currentPlayer().hand.length <= 1) break;
+      const played = botPlayRandomCard(playerId);
+      if (!played) break;
+      renderAll();
+      await wait(260);
+      if (game.gameOver || game.current !== playerId) return;
+    }
+
+    const moveAttempts = randomInt(0, 3);
+    for (let i = 0; i < moveAttempts; i++) {
+      const moved = botMoveOnce(playerId);
+      if (!moved) break;
+      renderAll();
+      await wait(260);
+      if (game.gameOver || game.current !== playerId) return;
+    }
+
+    botDiscardAndFinish(playerId);
+  }
+
+  function allDiscardCount() {
+    return game.players.reduce((sum,p) => sum + p.discard.length, 0);
+  }
+
+  function recycleDiscardsIntoDeck() {
+    if (game.finalRoundActive || game.deck.length) return game.deck.length > 0;
+    const recycled = [];
+    for (const p of game.players) recycled.push(...p.discard.splice(0));
+    if (!recycled.length) return false;
+    game.deck = seededShuffle(recycled);
+    addLog(`${recycled.length} açık ıskarta yeniden karıştırılıp ana deste yapıldı.`, 'DESTE YENİLENDİ');
+    toast(`${recycled.length} ıskarta yeniden desteye karıştırıldı.`);
+    return true;
+  }
+
+  function activateFinalRound(playerId) {
+    if (game.finalRoundActive) return;
+    game.finalRoundActive = true;
+    game.finalRoundOrigin = playerId;
+    addLog('Ana deste ve tüm ıskartalar tükendi. Herkes son turunu oynar; finalde Roma’yı tutan kazanır.', 'FINAL ROUND');
+    toast('FINAL ROUND başladı!');
+  }
+
+  function ensureDeckForDraw(playerId) {
+    if (game.deck.length) return true;
+    if (recycleDiscardsIntoDeck()) return true;
+    activateFinalRound(playerId);
+    return false;
+  }
+
+  function drawCardForPlayer(playerId) {
+    if (!ensureDeckForDraw(playerId)) return null;
+    const c = game.deck.pop();
+    playerById(playerId).hand.push(c);
+    return c;
+  }
+
+  function startTurn(playerId) {
+    game.current = playerId;
+    game.turnSerial += 1;
+    game.cardsPlayedThisTurn = 0;
+    game.botBusy = false;
+    game.phase = 'refill';
+    resetInteractionMode();
+    refreshLegionsForTurn(playerId);
+    addLog('turuna başladı. Önce elini 7 karta tamamlar.', PLAYER_NAMES[playerId]);
+    renderAll();
+    if (currentPlayer().isBot) scheduleBotTurn();
+    else beginRefillPhase();
+  }
+
+  function endTurn() {
+    if (game.gameOver || game.phase === 'refill' || currentPlayer().isBot || game.botBusy) return;
+    closeModal();
+    clearPreview();
+    if (game.phase === 'discard') {
+      toast('Elinden bir kart seçerek turu bitir.', false);
+      return;
+    }
+    if (!currentPlayer().hand.length) {
+      finalizeTurn();
+      return;
+    }
+    game.phase = 'discard';
+    resetInteractionMode();
+    setModeText('TURU BİTİR: Elindeki kartlardan 1 tanesini seç. Bu kart senden sonraki oyuncunun alabileceği açık ıskartaya gidecek.');
+    renderAll();
+  }
+
+  function beginRefillPhase() {
+    const p = currentPlayer();
+    if (p.hand.length >= 7) {
+      game.phase = 'play';
+      closeModal();
+      resetInteractionMode();
+      return;
+    }
+    if (game.finalRoundActive) {
+      game.phase = 'play';
+      closeModal();
+      addLog(`final turda yeni kart çekmeden ${p.hand.length} kartla oynayacak.`, PLAYER_NAMES[game.current]);
+      resetInteractionMode();
+      return;
+    }
+    if (!game.deck.length) recycleDiscardsIntoDeck();
+    if (!game.deck.length && allDiscardCount() === 0) {
+      activateFinalRound(game.current);
+      game.phase = 'play';
+      closeModal();
+      resetInteractionMode();
+      return;
+    }
+    closeModal();
+    game.phase = 'refill';
+    setModeText(`ELİNİ TAMAMLA: ${p.hand.length}/7. Kapalı desteye tıkla veya önceki oyuncunun açık ıskartasından kartı eline sürükle.`);
+    renderAll();
+  }
+
+
+  function humanDrawFromDeck() {
+    if (game.gameOver || currentPlayer().isBot || game.phase !== 'refill' || currentPlayer().hand.length >= 7) return;
+    if (!game.deck.length) recycleDiscardsIntoDeck();
+    const c = drawCardForPlayer(game.current);
+    if (c) addLog(`${CARD_INFO[c.type].label} kartını ana desteden aldı.`, PLAYER_NAMES[game.current]);
+    renderAll();
+    beginRefillPhase();
+  }
+
+  function openRefillModal() {
+    const p = currentPlayer();
+    const prevId = previousPlayerId();
+    const prev = playerById(prevId);
+    const need = Math.max(0,7-p.hand.length);
+    modalEl.innerHTML = `
+      <h3>🃏 Elini 7 karta tamamla</h3>
+      <p><strong>${PLAYER_NAMES[game.current]}</strong> ${need} kart daha almalı. Her kartı ya kapalı ana desteden ya da senden önce oynayan <strong>${PLAYER_NAMES[prevId]}</strong> oyuncusunun açık ıskartasından seçebilirsin.</p>
+      <div class="modalRow"><span>Ana deste</span><button id="drawDeckBtn" class="primary" ${game.deck.length ? '' : 'disabled'}>Kapalı Desteden 1 Çek (${game.deck.length})</button></div>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted)">${PLAYER_NAMES[prevId]} açık ıskartası (${prev.discard.length})</div>
+      <div id="discardChoices" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:7px;max-height:240px;overflow:auto"></div>
+      <div class="modalActions"><span style="margin-right:auto;color:var(--muted);font-size:11px">El: ${p.hand.length}/7</span></div>
+    `;
+    modalShade.classList.add('show');
+    const drawBtn = document.getElementById('drawDeckBtn');
+    drawB
