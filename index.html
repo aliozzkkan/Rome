@@ -25,8 +25,18 @@
           if (!response.ok) throw new Error(file + ' yüklenemedi: ' + response.status);
           parts.push(await response.text());
         }
+
+        const patchResponse = await fetch('patches/touch-army-v1.txt', { cache: 'no-store' });
+        if (!patchResponse.ok) throw new Error('Dokunmatik birlik kontrolü yüklenemedi: ' + patchResponse.status);
+        const touchArmyPatch = await patchResponse.text();
+
+        let gameHtml = parts.join('');
+        const finalScriptClose = gameHtml.lastIndexOf('</script>');
+        if (finalScriptClose < 0) throw new Error('Oyun script kapanışı bulunamadı.');
+        gameHtml = gameHtml.slice(0, finalScriptClose) + touchArmyPatch + '\n' + gameHtml.slice(finalScriptClose);
+
         document.open();
-        document.write(parts.join(''));
+        document.write(gameHtml);
         document.close();
       } catch (error) {
         document.getElementById('status').textContent = 'Oyun yüklenemedi: ' + error.message;
