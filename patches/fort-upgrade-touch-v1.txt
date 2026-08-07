@@ -1,0 +1,94 @@
+
+  // --- Reliable fort/home upgrade targeting for touch/iPad ---
+  function fortUpgradeCandidateForNode(node) {
+    if (!node || node.owner !== game.current) return null;
+    if (node.type !== 'home' && node.type !== 'fort') return null;
+    const cell = node.cells?.[0];
+    if (!cell) return null;
+    return {
+      kind: 'fort',
+      gx: cell.gx,
+      gz: cell.gz,
+      upgradeNodeId: node.id,
+      upgradeRoadId: null,
+      score: 999,
+    };
+  }
+
+  function selectedFortCard() {
+    if (!game.selectedCardId || game.phase !== 'play' || currentPlayer().isBot) return null;
+    return currentPlayer().hand.find(c => c.id === game.selectedCardId && c.type === 'fort') || null;
+  }
+
+  function upgradeFortFromPointerEvent(e) {
+    const cardObj = selectedFortCard();
+    if (!cardObj) return false;
+    const loc = locationUnderPointer(e);
+    if (!loc || loc.kind !== 'node') return false;
+    const node = nodes.get(loc.id);
+    const candidate = fortUpgradeCandidateForNode(node);
+    if (!candidate) return false;
+    playFort(candidate);
+    return true;
+  }
+
+  // On iPad/touch: tap Kale card, then tap your Ana Kale / Kale.
+  // Capture phase bypasses the less reliable ground-projection placement path.
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (e.pointerType !== 'touch') return;
+    if (!selectedFortCard()) return;
+    if (upgradeFortFromPointerEvent(e)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, { capture: true, passive: false });
+
+  // Desktop / HTML5 drag-drop fallback: dropping a Kale directly on a friendly castle upgrades it.
+  renderer.domElement.addEventListener('drop', e => {
+    if (game.phase !== 'play' || currentPlayer().isBot) return;
+    const draggedId = draggedHandCardId || game.selectedCardId;
+    if (!draggedId) return;
+    const cardObj = currentPlayer().hand.find(c => c.id === draggedId && c.type === 'fort');
+    if (!cardObj) return;
+    const loc = locationUnderPointer(e);
+    if (!loc || loc.kind !== 'node') return;
+    const node = nodes.get(loc.id);
+    const candidate = fortUpgradeCandidateForNode(node);
+    if (!candidate) return;
+    game.selectedCardId = cardObj.id;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    playFort(candidate);
+    draggedHandCardId = null;
+  }, { capture: true });
+
+  // Make friendly upgrade targets visibly glow whenever a Kale card is selected.
+  const baseFortUpgradeHighlights = updateNodeHighlights;
+  updateNodeHighlights = function(...args) {
+    const result = baseFortUpgradeHighlights.apply(this, args);
+    if (!selectedFortCard()) return result;
+    for (const node of nodes.values()) {
+      if (node.owner !== game.current || (node.type !== 'home' && node.type !== 'fort')) continue;
+      for (const group of node.groups || []) {
+        group.scale.setScalar(1.07);
+        const base = group.children?.[0];
+        if (base?.material?.emissive) {
+          base.material.emissive.setHex(0x6b5423);
+          base.material.emissiveIntensity = .95;
+        }
+      }
+    }
+    return result;
+  };
+
+  // Clarify touch instructions when selecting a fort card.
+  const baseFortUpgradeSelectCard = selectCard;
+  selectCard = function(cardId) {
+    const result = baseFortUpgradeSelectCard.call(this, cardId);
+    const c = currentPlayer()?.hand?.find(x => x.id === game.selectedCardId);
+    if (c?.type === 'fort') {
+      setModeText('KALE: Kendi Ana Kalene veya Kalene dokun = +1 seviye, +1 savunma, +3 kapasite. Yol üstüne/ucuna dokun = yeni kale kur.');
+      renderAll();
+    }
+    return result;
+  };
