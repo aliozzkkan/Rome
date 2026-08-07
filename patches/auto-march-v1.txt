@@ -1,0 +1,420 @@
+
+  // --- Rome attack detection fix + automatic march orders ---
+  // Loaded after cavalry + four-Rome patches.
+
+  const autoMarchOrders = [];
+  let nextAutoMarchId = 1;
+  let autoRouteSelect = null;
+  let autoMarchExecuting = false;
+  let autoMarchProcessedTurn = -1;
+
+  // FOUR-ROME FIX: cavalry-only and mixed stacks must also expose Rome attack.
+  readyRomeCastleAttacks = function() {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return [];
+    const pairs = [];
+    for (const [sourceId, g] of troopGroups.entries()) {
+      if (g.owner !== game.current || unitReadyTotal(g) < 1) continue;
+      const adjacent = adjacentLocations(sourceId);
+      for (const targetId of adjacent) {
+        if (!isRomeCastleId(targetId)) continue;
+        if (!targetIsHostileForCurrentPlayer(targetId)) continue;
+        pairs.push({ sourceId, targetId });
+      }
+    }
+    return pairs;
+  };
+
+  beginRomeCastleAttack = function(sourceId, targetId) {
+    const g = troopGroup(sourceId);
+    if (!g || g.owner !== game.current || unitReadyTotal(g) < 1 || !adjacentLocations(sourceId).has(targetId)) {
+      toast('Bu birlik artık seçilen Roma kalesine saldırabilecek konumda değil.', false);
+      return;
+    }
+    openTouchArmyPlanner(sourceId);
+    if (!touchArmyPlan) return;
+    touchArmyPlan.targetId = targetId;
+    if ((touchArmyPlan.legionCount || 0) + (touchArmyPlan.cavalryCount || 0) < 1) {
+      if ((g.ready || 0) > 0) touchArmyPlan.legionCount = 1;
+      else if (cavalryReady(g) > 0) touchArmyPlan.cavalryCount = 1;
+    }
+    setModeText(`${ROME_CASTLE_NAMES[targetId].toUpperCase()}: saldıracak Lejyon/Atlı sayısını seç.`);
+    renderAll();
+    renderTouchArmyPlanner();
+  };
+
+  // Make multi-source Rome selector show all ready unit types, not just legions.
+  openRomeCastleAttackSelector = function(targetFilter = null) {
+    let pairs = readyRomeCastleAttacks();
+    if (targetFilter) pairs = pairs.filter(x => x.targetId === targetFilter);
+    if (!pairs.length) {
+      toast('Bu Roma kalesine komşu, bu tur hareket edebilecek birliğin yok.', false);
+      return;
+    }
+    if (pairs.length === 1) {
+      beginRomeCastleAttack(pairs[0].sourceId, pairs[0].targetId);
+      return;
+    }
+    modalEl.innerHTML = `
+      <h3>⚔️ Hangi Roma kalesine saldıracaksın?</h3>
+      <p>Her Roma kalesi ayrı hedef. Hazır ordulardan birini seç.</p>
+      <div id="fourRomeChoices" style="display:grid;gap:8px"></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button></div>
+    `;
+    modalShade.classList.add('show');
+    const box = document.getElementById('fourRomeChoices');
+    for (const pair of pairs) {
+      const g = troopGroup(pair.sourceId);
+      const b = document.createElement('button');
+      b.className = 'primary';
+      const l = g?.ready || 0;
+      const c = cavalryReady(g);
+      b.textContent = `${ROME_CASTLE_NAMES[pair.targetId]} · ${l ? `⚔ ${l}` : ''}${l && c ? ' · ' : ''}${c ? `🐎 ${c}` : ''}`;
+      b.addEventListener('click', () => { closeModal(); beginRomeCastleAttack(pair.sourceId, pair.targetId); });
+      box.appendChild(b);
+    }
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+  };
+
+  // ---- Auto-march UI ----
+  const autoMarchStyle = document.createElement('style');
+  autoMarchStyle.textContent = `
+    #autoMarchPanel {
+      position:fixed; z-index:149; left:14px; bottom:146px; display:none;
+      width:min(330px,calc(100vw - 28px)); padding:9px 10px; border-radius:12px;
+      border:1px solid rgba(216,181,106,.38); background:rgba(13,17,21,.92);
+      color:#f3efe6; box-shadow:0 10px 28px rgba(0,0,0,.28);
+      backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+      font-size:11px;
+    }
+    #autoMarchPanel.show { display:block; }
+    #autoMarchPanel .autoHead { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px; }
+    #autoMarchPanel .autoTitle { color:#e4cc94;font-weight:800;letter-spacing:.06em; }
+    #autoMarchPanel .autoOrder { display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,.08); }
+    #autoMarchPanel .autoOrder:first-of-type { border-top:0; }
+    #autoMarchPanel .autoRouteText { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cbd2d8; }
+    #autoMarchPanel .autoRouteMeta { color:#8f9aa4;font-size:10px;margin-top:2px; }
+    #autoMarchPanel button { min-height:30px;padding:0 8px;border-radius:8px; }
+    #touchArmyPanel #tapArmyAutoRoute { background:#344456;border-color:#607890; }
+    @media (max-width:760px) { #autoMarchPanel { left:10px;bottom:205px;width:min(300px,calc(100vw - 20px)); } }
+  `;
+  document.head.appendChild(autoMarchStyle);
+
+  const autoMarchPanel = document.createElement('div');
+  autoMarchPanel.id = 'autoMarchPanel';
+  document.body.appendChild(autoMarchPanel);
+
+  function orderUnitText(order) {
+    const parts = [];
+    if (order.legions) parts.push(`⚔ ${order.legions}`);
+    if (order.cavalry) parts.push(`🐎 ${order.cavalry}`);
+    return parts.join(' · ');
+  }
+
+  function renderAutoMarchPanel() {
+    const mine = autoMarchOrders.filter(o => o.owner === game.current && o.status !== 'done');
+    autoMarchPanel.classList.toggle('show', mine.length > 0 && !currentPlayer().isBot);
+    if (!mine.length) { autoMarchPanel.innerHTML = ''; return; }
+    autoMarchPanel.innerHTML = `
+      <div class="autoHead"><span class="autoTitle">🚩 OTOMATİK YÜRÜYÜŞ</span><span>${mine.length} emir</span></div>
+      ${mine.map(o => `
+        <div class="autoOrder" data-auto-order="${o.id}">
+          <div>
+            <div class="autoRouteText">${locationLabel(o.currentLocationId)} → ${locationLabel(o.destinationId)}</div>
+            <div class="autoRouteMeta">${orderUnitText(o)} · ${o.status === 'waiting-battle' ? '⚔ saldırı bekliyor' : o.status === 'paused' ? '⏸ bekliyor' : 'otomatik'}</div>
+          </div>
+          <button type="button" data-auto-cancel="${o.id}">İptal</button>
+        </div>
+      `).join('')}
+    `;
+    autoMarchPanel.querySelectorAll('[data-auto-cancel]').forEach(btn => {
+      btn.addEventListener('click', () => cancelAutoMarchOrder(Number(btn.dataset.autoCancel), true));
+    });
+  }
+
+  function cancelAutoMarchOrder(id, notify = false) {
+    const idx = autoMarchOrders.findIndex(o => o.id === id);
+    if (idx < 0) return;
+    const [o] = autoMarchOrders.splice(idx,1);
+    if (notify) toast(`Otomatik yürüyüş iptal edildi: ${locationLabel(o.destinationId)}`);
+    renderAutoMarchPanel();
+  }
+
+  function cancelOrdersFromLocation(sourceId, owner = game.current, notify = false) {
+    let cancelled = 0;
+    for (let i = autoMarchOrders.length - 1; i >= 0; i--) {
+      const o = autoMarchOrders[i];
+      if (o.owner === owner && o.currentLocationId === sourceId && o.status !== 'done') {
+        autoMarchOrders.splice(i,1);
+        cancelled++;
+      }
+    }
+    if (cancelled && notify) toast('Manuel hareket nedeniyle otomatik yürüyüş emri iptal edildi.');
+    if (cancelled) renderAutoMarchPanel();
+  }
+
+  // Completed-road BFS. Hostile cells can be destinations but cannot be crossed through.
+  function autoReachableFrom(sourceId, owner, maxDepth = 40) {
+    const dist = new Map([[sourceId,0]]);
+    const prev = new Map();
+    const q = [sourceId];
+    while (q.length) {
+      const id = q.shift();
+      const d = dist.get(id) || 0;
+      if (d >= maxDepth) continue;
+      for (const next of adjacentLocations(id)) {
+        if (dist.has(next)) continue;
+        const oldCurrent = game.current;
+        game.current = owner;
+        const hostile = targetIsHostileForCurrentPlayer(next);
+        game.current = oldCurrent;
+        dist.set(next,d+1);
+        prev.set(next,id);
+        if (!hostile) q.push(next);
+      }
+    }
+    dist.delete(sourceId);
+    return {dist,prev};
+  }
+
+  function autoShortestPath(sourceId, destinationId, owner) {
+    if (sourceId === destinationId) return [sourceId];
+    const {dist,prev} = autoReachableFrom(sourceId,owner,60);
+    if (!dist.has(destinationId)) return null;
+    const path = [destinationId];
+    let cur = destinationId;
+    while (cur !== sourceId) {
+      cur = prev.get(cur);
+      if (!cur) return null;
+      path.push(cur);
+    }
+    return path.reverse();
+  }
+
+  function beginAutoRouteSelection() {
+    if (!touchArmyPlan) return;
+    const sourceId = touchArmyPlan.sourceId;
+    const g = troopGroup(sourceId);
+    if (!g || g.owner !== game.current) return;
+    const legions = Math.min(g.ready || 0, touchArmyPlan.legionCount || 0);
+    const cavalry = Math.min(cavalryReady(g), touchArmyPlan.cavalryCount || 0);
+    if (legions + cavalry < 1) {
+      toast('Önce otomatik yürüyecek birlikleri seç.',false);
+      return;
+    }
+    const reach = autoReachableFrom(sourceId,game.current,40);
+    if (!reach.dist.size) {
+      toast('Bu ordunun tamamlanmış yol ağında gidebileceği uzak bir hedef yok.',false);
+      return;
+    }
+    autoRouteSelect = { sourceId, legions, cavalry, reach };
+    game.selectedLocationId = sourceId;
+    game.selectedNodeId = nodes.has(sourceId) ? sourceId : null;
+    game.reachable = new Set(reach.dist.keys());
+    game.mode = 'move-target';
+    // Keep touchArmyPlan alive so the existing touch target listener routes into selectTouchArmyTarget.
+    touchArmyPanel.classList.remove('show');
+    setModeText(`🚩 OTOMATİK ROTA: ${orderUnitText(autoRouteSelect)} için tamamlanmış yol ağındaki uzak hedefe dokun. Düşmana gelince otomasyon durur.`);
+    renderAll();
+  }
+
+  function createAutoMarchOrder(targetId) {
+    if (!autoRouteSelect || !autoRouteSelect.reach.dist.has(targetId)) return false;
+    const {sourceId,legions,cavalry} = autoRouteSelect;
+    // One route per selected stack/location to avoid ambiguous splitting.
+    cancelOrdersFromLocation(sourceId,game.current,false);
+    const order = {
+      id: nextAutoMarchId++, owner:game.current,
+      currentLocationId:sourceId, destinationId:targetId,
+      legions, cavalry,
+      createdTurnSerial:game.turnSerial,
+      status:'active'
+    };
+    autoMarchOrders.push(order);
+    addLog(`${orderUnitText(order)} için otomatik rota verdi: ${locationLabel(sourceId)} → ${locationLabel(targetId)}.`,PLAYER_NAMES[game.current]);
+    toast(`🚩 Otomatik rota: ${locationLabel(targetId)}`);
+    autoRouteSelect = null;
+    hideTouchArmyPlanner();
+    resetInteractionMode();
+    renderAutoMarchPanel();
+    return true;
+  }
+
+  // Add an Automation button to the existing mixed-unit touch planner.
+  const baseAutoRenderTouchArmyPlanner = renderTouchArmyPlanner;
+  renderTouchArmyPlanner = function(...args) {
+    const result = baseAutoRenderTouchArmyPlanner.apply(this,args);
+    if (!touchArmyPlan || !touchArmyPanel.classList.contains('show')) return result;
+    const actions = touchArmyPanel.querySelector('.tap-actions');
+    if (actions && !document.getElementById('tapArmyAutoRoute')) {
+      const b = document.createElement('button');
+      b.id = 'tapArmyAutoRoute';
+      b.type = 'button';
+      b.textContent = '🚩 Otomatik Rota';
+      b.addEventListener('click',beginAutoRouteSelection);
+      actions.insertBefore(b,actions.firstChild);
+    }
+    return result;
+  };
+
+  // Intercept normal target selection while choosing a far automation destination.
+  const baseAutoSelectTouchArmyTarget = selectTouchArmyTarget;
+  selectTouchArmyTarget = function(targetId) {
+    if (autoRouteSelect) {
+      if (!autoRouteSelect.reach.dist.has(targetId)) {
+        toast('O hedef mevcut tamamlanmış yol ağıyla ulaşılamıyor.',false);
+        return;
+      }
+      createAutoMarchOrder(targetId);
+      return;
+    }
+    return baseAutoSelectTouchArmyTarget.call(this,targetId);
+  };
+
+  // Cancel auto-route selection cleanly when normal interaction resets.
+  const baseAutoResetInteractionMode = resetInteractionMode;
+  resetInteractionMode = function(...args) {
+    autoRouteSelect = null;
+    const result = baseAutoResetInteractionMode.apply(this,args);
+    renderAutoMarchPanel();
+    return result;
+  };
+
+  // If the user manually moves/attacks from a stack that had an order, cancel that order.
+  const baseAutoMoveMixedFriendly = moveMixedFriendly;
+  moveMixedFriendly = function(sourceId,targetId,legions,cavalry) {
+    if (!autoMarchExecuting) cancelOrdersFromLocation(sourceId,game.current,true);
+    return baseAutoMoveMixedFriendly.call(this,sourceId,targetId,legions,cavalry);
+  };
+
+  const baseAutoResolveMixedBattle = resolveMixedBattle;
+  resolveMixedBattle = function(sourceId,targetId,legions,cavalry,atkSupport='none',defSupport='none') {
+    if (!autoMarchExecuting) cancelOrdersFromLocation(sourceId,game.current,true);
+    return baseAutoResolveMixedBattle.call(this,sourceId,targetId,legions,cavalry,atkSupport,defSupport);
+  };
+
+  function processOneAutoMarch(order) {
+    if (order.owner !== game.current || order.status === 'done') return false;
+    if (game.turnSerial <= order.createdTurnSerial) return false; // never move on the same turn the order is created
+
+    const g = troopGroup(order.currentLocationId);
+    if (!g || g.owner !== order.owner) {
+      order.status = 'paused';
+      return false;
+    }
+    const legions = Math.min(order.legions,g.ready || 0);
+    const cavalry = Math.min(order.cavalry,cavalryReady(g));
+    if (legions + cavalry < 1) {
+      order.status = 'paused';
+      return false;
+    }
+    order.legions = legions;
+    order.cavalry = cavalry;
+
+    if (order.currentLocationId === order.destinationId) {
+      order.status = 'done';
+      return false;
+    }
+    const path = autoShortestPath(order.currentLocationId,order.destinationId,order.owner);
+    if (!path || path.length < 2) {
+      order.status = 'paused';
+      return false;
+    }
+
+    // Never auto-start combat. If the immediate next cell is hostile, stop and expose attack controls.
+    const nextId = path[1];
+    const oldCurrent = game.current;
+    game.current = order.owner;
+    const immediateHostile = targetIsHostileForCurrentPlayer(nextId);
+    game.current = oldCurrent;
+    if (immediateHostile) {
+      order.status = 'waiting-battle';
+      addLog(`otomatik yürüyüş ${locationLabel(nextId)} önünde durdu; saldırı emri bekliyor.`,PLAYER_NAMES[order.owner]);
+      return false;
+    }
+
+    let stepCount = legions > 0 ? 1 : (cavalry > 0 ? 2 : 1);
+    let targetIndex = Math.min(stepCount,path.length-1);
+    // If a 2-step cavalry move would land on a hostile destination, stop one square before it.
+    if (targetIndex > 1) {
+      const candidate = path[targetIndex];
+      game.current = order.owner;
+      const hostile = targetIsHostileForCurrentPlayer(candidate);
+      game.current = oldCurrent;
+      if (hostile) targetIndex -= 1;
+    }
+    if (targetIndex < 1) {
+      order.status = 'waiting-battle';
+      return false;
+    }
+    const targetId = path[targetIndex];
+
+    game.current = order.owner;
+    autoMarchExecuting = true;
+    const moved = baseAutoMoveMixedFriendly.call(this,order.currentLocationId,targetId,legions,cavalry);
+    autoMarchExecuting = false;
+    game.current = oldCurrent;
+    if (!moved) {
+      order.status = 'paused';
+      return false;
+    }
+    order.currentLocationId = targetId;
+    order.status = targetId === order.destinationId ? 'done' : 'active';
+    addLog(`otomatik yürüdü: ${locationLabel(targetId)}${order.status === 'done' ? ' · hedefe ulaştı' : ''}.`,PLAYER_NAMES[order.owner]);
+    return true;
+  }
+
+  function processAutoMarchOrdersForCurrentTurn() {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return;
+    if (autoMarchProcessedTurn === game.turnSerial) return;
+    autoMarchProcessedTurn = game.turnSerial;
+    const mine = autoMarchOrders.filter(o => o.owner === game.current && o.status !== 'done');
+    if (!mine.length) { renderAutoMarchPanel(); return; }
+    let movedAny = false;
+    for (const order of mine) movedAny = processOneAutoMarch(order) || movedAny;
+    for (let i=autoMarchOrders.length-1;i>=0;i--) if (autoMarchOrders[i].status === 'done') autoMarchOrders.splice(i,1);
+    renderAll();
+    renderAutoMarchPanel();
+    if (movedAny) toast('🚩 Otomatik yürüyüş emirleri uygulandı.');
+    // Four-Rome attack prompt must refresh after automatic movement.
+    if (typeof refreshFourRomeAttackHint === 'function') requestAnimationFrame(refreshFourRomeAttackHint);
+  }
+
+  // Execute automation as soon as refill ends and the human reaches PLAY phase.
+  const baseAutoBeginRefillPhase = beginRefillPhase;
+  beginRefillPhase = function(...args) {
+    const before = game.phase;
+    const result = baseAutoBeginRefillPhase.apply(this,args);
+    if (game.phase === 'play' && !currentPlayer().isBot) {
+      requestAnimationFrame(processAutoMarchOrdersForCurrentTurn);
+    }
+    return result;
+  };
+
+  // Also catch turns that enter PLAY by another route (e.g. final round).
+  const baseAutoRenderAll = renderAll;
+  renderAll = function(...args) {
+    const result = baseAutoRenderAll.apply(this,args);
+    renderAutoMarchPanel();
+    if (game.phase === 'play' && !currentPlayer().isBot && autoMarchProcessedTurn !== game.turnSerial) {
+      requestAnimationFrame(processAutoMarchOrdersForCurrentTurn);
+    }
+    if (typeof refreshFourRomeAttackHint === 'function') requestAnimationFrame(refreshFourRomeAttackHint);
+    return result;
+  };
+
+  // Clear orders on New Game / reset.
+  const baseAutoResetGame = resetGame;
+  resetGame = function(...args) {
+    autoMarchOrders.length = 0;
+    nextAutoMarchId = 1;
+    autoRouteSelect = null;
+    autoMarchProcessedTurn = -1;
+    const result = baseAutoResetGame.apply(this,args);
+    renderAutoMarchPanel();
+    return result;
+  };
+
+  requestAnimationFrame(() => {
+    renderAutoMarchPanel();
+    if (typeof refreshFourRomeAttackHint === 'function') refreshFourRomeAttackHint();
+  });
