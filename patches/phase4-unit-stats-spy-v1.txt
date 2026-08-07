@@ -1,0 +1,327 @@
+
+  // === PHASE 4: Attack / Defense / Speed stats + upgrade cards + Spy ===
+  const BASE_UNIT_STATS = {
+    legion:  { attack:1, defense:2, speed:1 },
+    cavalry: { attack:2, defense:1, speed:2 },
+  };
+
+  function cloneBaseUnitStats() {
+    return {
+      legion:{...BASE_UNIT_STATS.legion},
+      cavalry:{...BASE_UNIT_STATS.cavalry},
+    };
+  }
+
+  function ensurePlayerMilitaryData(player) {
+    if (!player) return;
+    if (!player.unitStats) player.unitStats = cloneBaseUnitStats();
+    if (!(player.spyIntel instanceof Set)) player.spyIntel = new Set(player.spyIntel || []);
+  }
+
+  function statsForPlayer(playerId,type) {
+    if (!playerId) return BASE_UNIT_STATS[type] || BASE_UNIT_STATS.legion;
+    const p = playerById(playerId);
+    ensurePlayerMilitaryData(p);
+    return p?.unitStats?.[type] || BASE_UNIT_STATS[type];
+  }
+
+  function selectedArmySpeed(playerId,legions,cavalry) {
+    const speeds = [];
+    if (legions > 0) speeds.push(statsForPlayer(playerId,'legion').speed);
+    if (cavalry > 0) speeds.push(statsForPlayer(playerId,'cavalry').speed);
+    return speeds.length ? Math.max(1,Math.min(...speeds)) : 0;
+  }
+
+  function attackPowerFor(playerId,legions,cavalry) {
+    const l = statsForPlayer(playerId,'legion');
+    const c = statsForPlayer(playerId,'cavalry');
+    return legions*l.attack + cavalry*c.attack;
+  }
+
+  function defensePowerFor(playerId,g) {
+    if (!g) return 0;
+    const l = statsForPlayer(playerId,'legion');
+    const c = statsForPlayer(playerId,'cavalry');
+    return legionTotalInGroup(g)*l.defense + cavalryTotalInGroup(g)*c.defense;
+  }
+
+  function humanCanSeeMilitaryStats(playerId) {
+    if (!playerId || playerId === HUMAN_PLAYER_ID) return true;
+    const human = playerById(HUMAN_PLAYER_ID);
+    ensurePlayerMilitaryData(human);
+    return human.spyIntel.has(playerId);
+  }
+
+  // Replace the old +2/+3 generic cards with permanent stat upgrades + Spy while keeping Siege.
+  for (const key of Object.keys(CARD_COUNTS)) delete CARD_COUNTS[key];
+  Object.assign(CARD_COUNTS, {
+    road:25,
+    fort:20,
+    legion:20,
+    reinforcement:8,
+    attack_upgrade:7,
+    defense_upgrade:6,
+    speed_upgrade:5,
+    spy:4,
+    siege:5,
+  });
+  CARD_INFO.attack_upgrade = { icon:'🗡️', label:'Silah Eğitimi', desc:'Seçtiğin birlik türüne kalıcı +1 Saldırı.' };
+  CARD_INFO.defense_upgrade = { icon:'🛡️', label:'Zırh Eğitimi', desc:'Seçtiğin birlik türüne kalıcı +1 Savunma.' };
+  CARD_INFO.speed_upgrade = { icon:'🥾', label:'Lojistik', desc:'Seçtiğin birlik türüne kalıcı +1 Hız.' };
+  CARD_INFO.spy = { icon:'🕵️', label:'Casus', desc:'Bir rakibin Lejyon ve Atlı Saldırı/Savunma/Hız değerlerini kalıcı olarak gör.' };
+  CARD_INFO.siege = { icon:'🧨', label:'Kuşatma', desc:'Kale veya Roma kalesine saldırırken +3 Saldırı.' };
+  REACTION_CARD_TYPES.clear();
+  REACTION_CARD_TYPES.add('siege');
+
+  const baseStatsBuildDeckAndHands = buildDeckAndHands;
+  buildDeckAndHands = function(...args) {
+    baseStatsBuildDeckAndHands.apply(this,args);
+    const deck = [];
+    const push = (type,n) => { for(let i=0;i<n;i++) deck.push(card(type)); };
+    push('road',25); push('fort',20); push('legion',20); push('reinforcement',8);
+    push('attack_upgrade',7); push('defense_upgrade',6); push('speed_upgrade',5); push('spy',4); push('siege',5);
+    if (deck.length !== TOTAL_CARDS) throw new Error(`Yeni deste 100 kart olmalı, ${deck.length} oldu.`);
+    game.deck = seededShuffle(deck);
+    game.spentPile = [];
+    for (const p of game.players) {
+      p.hand = [];
+      p.discard = [];
+      if (p.romeCoins == null) p.romeCoins = 0;
+      p.lastRomeIncome = 0;
+      p.unitStats = cloneBaseUnitStats();
+      p.spyIntel = new Set();
+      for(let i=0;i<7;i++) p.hand.push(game.deck.pop());
+    }
+    if (typeof renderReferenceTable === 'function') renderReferenceTable();
+  };
+
+  function spendSpecificHandCard(cardId) {
+    const p = currentPlayer();
+    const idx = p.hand.findIndex(c=>c.id===cardId);
+    if (idx < 0) return null;
+    const [c] = p.hand.splice(idx,1);
+    game.spentPile.push(c);
+    game.cardsPlayedThisTurn += 1;
+    game.selectedCardId = null;
+    return c;
+  }
+
+  function openPermanentUpgradeModal(cardObj,statKey) {
+    if (!cardObj || !canPlayAnotherCard() || currentPlayer().hand.length <= 1) return;
+    const label = statKey==='attack'?'Saldırı':statKey==='defense'?'Savunma':'Hız';
+    modalEl.innerHTML = `
+      <h3>${CARD_INFO[cardObj.type].icon} ${CARD_INFO[cardObj.type].label}</h3>
+      <p>Bu kart kalıcıdır. Hangi birlik türünün ${label} değerini +1 artırmak istiyorsun?</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">
+        <button id="upgradeLegion" class="primary">⚔️ Lejyon<br><small>S ${statsForPlayer(game.current,'legion').attack} · D ${statsForPlayer(game.current,'legion').defense} · H ${statsForPlayer(game.current,'legion').speed}</small></button>
+        <button id="upgradeCavalry" class="primary">🐎 Atlı<br><small>S ${statsForPlayer(game.current,'cavalry').attack} · D ${statsForPlayer(game.current,'cavalry').defense} · H ${statsForPlayer(game.current,'cavalry').speed}</small></button>
+      </div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button></div>`;
+    modalShade.classList.add('show');
+    const apply = type => {
+      const p = currentPlayer(); ensurePlayerMilitaryData(p);
+      p.unitStats[type][statKey] += 1;
+      spendSpecificHandCard(cardObj.id);
+      addLog(`${type==='legion'?'Lejyon':'Atlı'} ${label} değerini +1 geliştirdi.`,PLAYER_NAMES[game.current]);
+      closeModal(); resetInteractionMode(); renderAll();
+      toast(`${type==='legion'?'⚔️ Lejyon':'🐎 Atlı'} ${label} +1`);
+    };
+    document.getElementById('upgradeLegion').addEventListener('click',()=>apply('legion'));
+    document.getElementById('upgradeCavalry').addEventListener('click',()=>apply('cavalry'));
+    document.getElementById('modalCancel').addEventListener('click',closeModal);
+  }
+
+  function openSpyModal(cardObj) {
+    if (!cardObj || !canPlayAnotherCard() || currentPlayer().hand.length <= 1) return;
+    const targets = game.players.filter(p=>p.id!==game.current);
+    modalEl.innerHTML = `
+      <h3>🕵️ Casus Gönder</h3>
+      <p>Bir rakip seç. O oyuncunun Lejyon ve Atlı Saldırı / Savunma / Hız değerleri oyunun geri kalanında görünür olacak.</p>
+      <div id="spyTargets" style="display:grid;gap:8px"></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button></div>`;
+    modalShade.classList.add('show');
+    const box = document.getElementById('spyTargets');
+    for (const target of targets) {
+      const b = document.createElement('button'); b.className='primary'; b.textContent=`🕵️ ${PLAYER_NAMES[target.id]}`;
+      b.addEventListener('click',()=>{
+        const p=currentPlayer(); ensurePlayerMilitaryData(p); p.spyIntel.add(target.id);
+        spendSpecificHandCard(cardObj.id);
+        addLog(`${PLAYER_NAMES[target.id]} askeri istihbaratını açtı.`,PLAYER_NAMES[game.current]);
+        closeModal(); resetInteractionMode(); renderAll(); toast(`🕵️ ${PLAYER_NAMES[target.id]} askeri değerleri açıldı.`);
+      });
+      box.appendChild(b);
+    }
+    document.getElementById('modalCancel').addEventListener('click',closeModal);
+  }
+
+  const baseStatsSelectCard = selectCard;
+  selectCard = function(cardId) {
+    const c = currentPlayer()?.hand?.find(x=>x.id===cardId);
+    if (c && ['attack_upgrade','defense_upgrade','speed_upgrade','spy'].includes(c.type)) {
+      if (!canPlayAnotherCard()) { toast('Bu tur 3 kart sınırına ulaştın.',false); return; }
+      if (currentPlayer().hand.length<=1) { toast('Tur sonunda atmak için 1 kart bırakmalısın.',false); return; }
+      if (c.type==='spy') openSpyModal(c);
+      else openPermanentUpgradeModal(c,c.type==='attack_upgrade'?'attack':c.type==='defense_upgrade'?'defense':'speed');
+      return;
+    }
+    return baseStatsSelectCard.call(this,cardId);
+  };
+
+  // Movement now follows upgraded Speed values.
+  updateMixedPlannerReachable = function() {
+    if (!touchArmyPlan) return;
+    const l = touchArmyPlan.legionCount || 0;
+    const c = touchArmyPlan.cavalryCount || 0;
+    const speed = selectedArmySpeed(game.current,l,c);
+    game.reachable = speed ? new Set(completedReachableWithin(touchArmyPlan.sourceId,speed).keys()) : new Set();
+    if (touchArmyPlan.targetId && !game.reachable.has(touchArmyPlan.targetId)) touchArmyPlan.targetId=null;
+  };
+
+  moveMixedFriendly = function(sourceId,targetId,legions,cavalry) {
+    if (typeof autoMarchExecuting !== 'undefined' && !autoMarchExecuting && typeof cancelOrdersFromLocation === 'function') cancelOrdersFromLocation(sourceId,game.current,true);
+    const sg=troopGroup(sourceId); if(!sg||sg.owner!==game.current) return false;
+    if((sg.ready||0)<legions||cavalryReady(sg)<cavalry) return false;
+    const speed=selectedArmySpeed(game.current,legions,cavalry);
+    const dist=movementDistance(sourceId,targetId,speed);
+    if(!Number.isFinite(dist)||dist>speed){toast(`Bu birlik grubunun Hız değeri ${speed}.`,false);return false;}
+    if(!mixedMoveCapacityOkay(targetId,legions,cavalry)){toast(`${locationLabel(targetId)} kapasitesi yetersiz.`,false);return false;}
+    removeTroops(sourceId,legions,0); removeCavalry(sourceId,cavalry,0);
+    animateMixedMarch(game.current,legions,cavalry,sourceId,targetId,'move');
+    let tg=troopGroup(targetId);
+    if(!tg){tg={owner:game.current,ready:0,spent:0,cavReady:0,cavSpent:0};troopGroups.set(targetId,tg);}
+    if(tg.owner!==game.current) return false;
+    tg.spent=(tg.spent||0)+legions; tg.cavSpent=cavalrySpent(tg)+cavalry;
+    const node=nodes.get(targetId); if(node&&node.type!=='home'&&(node.owner===0||node.owner===game.current)) node.owner=game.current;
+    syncTroopVisual(sourceId); syncTroopVisual(targetId);
+    addLog(`${legions?`${legions} Lejyon`:''}${legions&&cavalry?' + ':''}${cavalry?`${cavalry} Atlı`:''} ${dist} kart ilerledi (Hız ${speed}).`,PLAYER_NAMES[game.current]);
+    return true;
+  };
+
+  // Exact stat-based combat resolver.
+  resolveMixedBattle = function(sourceId,targetId,legions,cavalry,atkSupport='none',defSupport='none') {
+    if (typeof autoMarchExecuting !== 'undefined' && !autoMarchExecuting && typeof cancelOrdersFromLocation === 'function') cancelOrdersFromLocation(sourceId,game.current,true);
+    const attacker=game.current, source=troopGroup(sourceId), target=troopGroup(targetId), node=nodes.get(targetId);
+    if(!source||source.owner!==attacker||(source.ready||0)<legions||cavalryReady(source)<cavalry) return;
+    const speed=selectedArmySpeed(attacker,legions,cavalry), dist=movementDistance(sourceId,targetId,speed);
+    if(!Number.isFinite(dist)||dist>speed) return;
+    const defenderOwner=target?.owner||node?.owner||0;
+    const oldOwner=node?.owner||target?.owner||0;
+    const atkSupportPower=supportPower(atkSupport,'atk',node);
+    if(atkSupportPower&&atkSupport!=='none') removeOneSupportCard(attacker,atkSupport,true);
+    const attackUnits=legions+cavalry;
+    const defenderUnits=unitTotalInGroup(target);
+    const atkPower=attackPowerFor(attacker,legions,cavalry)+atkSupportPower;
+    const defPower=defensePowerFor(defenderOwner,target)+(node?defenseBonus(node):0);
+    const defenderBefore=defenderUnits;
+    removeTroops(sourceId,legions,0); removeCavalry(sourceId,cavalry,0);
+    animateMixedMarch(attacker,legions,cavalry,sourceId,targetId,'battle');
+    let attackerWon=atkPower>defPower, attackerSurvivors=0, attackerLosses=attackUnits, defenderAfter=defenderUnits, defenderLosses=0, captured=false;
+    if(attackerWon){
+      let casualties=Math.min(Math.max(0,attackUnits-1),Math.floor(defPower/2));
+      let surviveLegion=legions, surviveCavalry=cavalry;
+      const lLoss=Math.min(surviveLegion,casualties); surviveLegion-=lLoss; casualties-=lLoss;
+      surviveCavalry=Math.max(0,surviveCavalry-casualties);
+      if(surviveLegion+surviveCavalry<1){ if(cavalry>0) surviveCavalry=1; else surviveLegion=1; }
+      attackerSurvivors=surviveLegion+surviveCavalry; attackerLosses=attackUnits-attackerSurvivors; defenderLosses=defenderUnits; defenderAfter=0;
+      troopGroups.delete(targetId);
+      if(node?.type==='home'){
+        const homeKeep=Math.max(1,Math.ceil(defenderUnits/2));
+        troopGroups.set(targetId,{owner:oldOwner,ready:homeKeep,spent:0,cavReady:0,cavSpent:0});
+        defenderAfter=homeKeep; defenderLosses=Math.max(0,defenderUnits-homeKeep); captured=false;
+        let back=troopGroup(sourceId); if(!back){back={owner:attacker,ready:0,spent:0,cavReady:0,cavSpent:0};troopGroups.set(sourceId,back);}
+        back.spent+=surviveLegion; back.cavSpent=cavalrySpent(back)+surviveCavalry;
+        stealRandomCard(oldOwner,attacker);
+      } else {
+        const cap=node&&Number.isFinite(nodeCapacity(node))?nodeCapacity(node):Infinity;
+        let allowed=Math.min(attackerSurvivors,cap);
+        const placeCav=Math.min(surviveCavalry,allowed); allowed-=placeCav; const placeLeg=Math.min(surviveLegion,allowed);
+        troopGroups.set(targetId,{owner:attacker,ready:0,spent:placeLeg,cavReady:0,cavSpent:placeCav});
+        attackerSurvivors=placeLeg+placeCav;
+        if(node){node.owner=attacker;captured=oldOwner!==attacker;}
+      }
+      addLog(node?.type==='rome'?`${locationLabel(targetId)} ele geçirildi!`:'savaşı kazandı.',PLAYER_NAMES[attacker]);
+    } else {
+      defenderLosses=Math.min(defenderUnits,Math.floor(atkPower/2));
+      if(target&&defenderLosses>0){removeDefenderUnits(target,defenderLosses);if(unitTotalInGroup(target)<=0)troopGroups.delete(targetId);}
+      defenderAfter=Math.max(0,defenderUnits-defenderLosses);
+      addLog(`saldırıda durduruldu (${atkPower} vs ${defPower}).`,PLAYER_NAMES[attacker]);
+    }
+    syncTroopVisual(sourceId); syncTroopVisual(targetId); renderAll();
+    if(typeof queueBattleReport==='function') queueBattleReport({
+      attacker,defender:defenderOwner,targetLabel:locationLabel(targetId),
+      attackerUnitsText:`⚔ ${legions}${cavalry?` · 🐎 ${cavalry}`:''}`,
+      attackerBefore:attackUnits,attackerLosses,attackerSurvivors,
+      defenderBefore,defenderLosses,defenderAfter,
+      attackPower:atkPower,defensePower:defPower,attackerWon,captured
+    });
+    if(captured&&node?.type==='rome') toast('🏛️ Roma kalesi alındı! Bağlantı korunursa sonraki tur Roma Coin üretir.');
+    else toast(attackerWon?'Saldırı başarılı!':'Savunma saldırıyı durdurdu.',attackerWon);
+  };
+  resolveBattle = function(sourceId,targetId,committed,atkSupport='none',defSupport='none') { return resolveMixedBattle(sourceId,targetId,committed,0,atkSupport,defSupport); };
+
+  // Battle confirmation respects Spy visibility.
+  openMixedBattleConfirm = function(sourceId,targetId,legions,cavalry) {
+    const tg=troopGroup(targetId), defenderOwner=tg?.owner||nodes.get(targetId)?.owner||0, node=nodes.get(targetId);
+    const attackPreview=attackPowerFor(game.current,legions,cavalry);
+    const visible=humanCanSeeMilitaryStats(defenderOwner);
+    const defensePreview=visible ? defensePowerFor(defenderOwner,tg)+(node?defenseBonus(node):0) : '?';
+    const siegeCount=node&&(node.type==='fort'||node.type==='rome')?supportCount(game.current,'siege'):0;
+    modalEl.innerHTML=`
+      <h3>⚔️ ${locationLabel(targetId)} saldırısı</h3>
+      <p>${visible?'Düşman askeri değerleri biliniyor.':'Düşmanın gerçek askeri statları gizli. Casus kartı kullanarak açabilirsin.'}</p>
+      <div class="modalRow"><span>Senin birliklerin</span><strong>⚔ ${legions} · 🐎 ${cavalry}</strong></div>
+      <div class="modalRow"><span>Tahmini saldırı gücü</span><strong>${attackPreview}</strong></div>
+      <div class="modalRow"><span>Düşman savunma gücü</span><strong>${defensePreview}</strong></div>
+      <div class="modalRow"><label for="atkSupport">Kuşatma desteği</label><select id="atkSupport" style="max-width:250px"><option value="none">Yok</option>${siegeCount?`<option value="siege">🧨 Kuşatma +3 (${siegeCount})</option>`:''}</select></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button><button id="modalConfirm" class="primary">Saldır</button></div>`;
+    modalShade.classList.add('show');
+    document.getElementById('modalCancel').addEventListener('click',closeModal);
+    document.getElementById('modalConfirm').addEventListener('click',()=>{
+      resolveMixedBattle(sourceId,targetId,legions,cavalry,document.getElementById('atkSupport').value,'none');
+      closeModal(); hideTouchArmyPlanner(); resetInteractionMode();
+    });
+  };
+
+  // Military intelligence UI.
+  const baseStatsRenderPlayers = renderPlayers;
+  renderPlayers = function(...args) {
+    const result=baseStatsRenderPlayers.apply(this,args);
+    const rows=[...playersEl.querySelectorAll('.playerRow')];
+    rows.forEach((row,index)=>{
+      const p=game.players[index]; if(!p)return; ensurePlayerMilitaryData(p);
+      let el=row.querySelector('.unitStatsIntel'); if(!el){el=document.createElement('div');el.className='unitStatsIntel';el.style.cssText='margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.07);font-size:9px;color:#9faab3;line-height:1.45';row.appendChild(el);}
+      if(p.id!==HUMAN_PLAYER_ID&&!humanCanSeeMilitaryStats(p.id)) el.innerHTML='🕵️ Askeri statlar: <strong style="color:#ddd">? / ? / ?</strong>';
+      else {
+        const l=statsForPlayer(p.id,'legion'),c=statsForPlayer(p.id,'cavalry');
+        el.innerHTML=`⚔ Lejyon: S${l.attack} D${l.defense} H${l.speed}<br>🐎 Atlı: S${c.attack} D${c.defense} H${c.speed}`;
+      }
+    });
+    return result;
+  };
+
+  // Speed upgrades also affect automatic march orders.
+  if (typeof processOneAutoMarch === 'function') {
+    processOneAutoMarch = function(order) {
+      if(order.owner!==game.current||order.status==='done'||game.turnSerial<=order.createdTurnSerial)return false;
+      const g=troopGroup(order.currentLocationId); if(!g||g.owner!==order.owner){order.status='paused';return false;}
+      const legions=Math.min(order.legions,g.ready||0), cavalry=Math.min(order.cavalry,cavalryReady(g));
+      if(legions+cavalry<1){order.status='paused';return false;}
+      order.legions=legions;order.cavalry=cavalry;
+      if(order.currentLocationId===order.destinationId){order.status='done';return false;}
+      const path=autoShortestPath(order.currentLocationId,order.destinationId,order.owner); if(!path||path.length<2){order.status='paused';return false;}
+      let speed=selectedArmySpeed(order.owner,legions,cavalry), targetIndex=Math.min(speed,path.length-1);
+      const oldCurrent=game.current; game.current=order.owner;
+      for(let i=1;i<=targetIndex;i++){
+        if(targetIsHostileForCurrentPlayer(path[i])){targetIndex=i-1;order.status='waiting-battle';break;}
+      }
+      game.current=oldCurrent; if(targetIndex<1)return false;
+      const targetId=path[targetIndex]; game.current=order.owner; autoMarchExecuting=true;
+      const moved=moveMixedFriendly(order.currentLocationId,targetId,legions,cavalry); autoMarchExecuting=false; game.current=oldCurrent;
+      if(!moved){order.status='paused';return false;}
+      order.currentLocationId=targetId; order.status=targetId===order.destinationId?'done':'active';
+      addLog(`otomatik yürüdü: ${locationLabel(targetId)} · Hız ${speed}.`,PLAYER_NAMES[order.owner]); return true;
+    };
+  }
+
+  // Apply the new 100-card deck and stats immediately on page load.
+  setTimeout(()=>resetGame(),0);
