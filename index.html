@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tüm Yollar Roma'ya Çıkar</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;background:#0d1115;color:#f3efe6;font-family:system-ui,-apple-system,sans-serif}
+    body{display:grid;place-items:center}
+    #status{padding:24px;text-align:center;font-size:14px;color:#a8b2bd}
+  </style>
+</head>
+<body>
+  <div id="status">Oyun yükleniyor…</div>
+  <script>
+    (async () => {
+      try {
+        const files = [
+          'parts/part-00.txt','parts/part-01.txt','parts/part-02.txt',
+          'parts/part-03.txt','parts/part-04.txt','parts/part-05.txt'
+        ];
+        const parts = [];
+        for (const file of files) {
+          const response = await fetch(file, { cache: 'no-store' });
+          if (!response.ok) throw new Error(file + ' yüklenemedi: ' + response.status);
+          parts.push(await response.text());
+        }
+        document.open();
+        document.write(parts.join(''));
+        document.close();
+      } catch (error) {
+        document.getElementById('status').textContent = 'Oyun yüklenemedi: ' + error.message;
+        console.error(error);
+      }
+    })();
+  </script>
+</body>
+</html>
