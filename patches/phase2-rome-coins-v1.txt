@@ -1,0 +1,106 @@
+
+  // === PHASE 2: Rome coin economy ===
+  const baseCoinBuildDeckAndHands = buildDeckAndHands;
+  buildDeckAndHands = function(...args) {
+    const result = baseCoinBuildDeckAndHands.apply(this,args);
+    for (const p of game.players) {
+      p.romeCoins = 0;
+      p.lastRomeIncome = 0;
+    }
+    return result;
+  };
+
+  function tradePathExists(playerId, targetRomeId) {
+    const start = `home-${playerId}`;
+    if (!nodes.has(start) || !nodes.has(targetRomeId)) return false;
+    const seen = new Set([start]);
+    const q = [start];
+    while (q.length) {
+      const id = q.shift();
+      for (const next of adjacentLocations(id)) {
+        if (seen.has(next)) continue;
+        const node = nodes.get(next);
+        if (node) {
+          if (next === targetRomeId) return node.owner === playerId;
+          // Enemy/neutral forts block a trade route. Friendly forts are gates in the network.
+          if (node.owner !== playerId) continue;
+        }
+        seen.add(next);
+        q.push(next);
+      }
+    }
+    return false;
+  }
+
+  function activeTradeRomeCastles(playerId) {
+    if (typeof getRomeCastles !== 'function') return [];
+    return getRomeCastles().filter(castle => {
+      if (castle.owner !== playerId) return false;
+      const g = troopGroup(castle.id);
+      if (!g || g.owner !== playerId || troopTotal(castle.id) < 1) return false;
+      return tradePathExists(playerId,castle.id);
+    });
+  }
+
+  function awardRomeCoinIncome(playerId) {
+    const p = playerById(playerId);
+    if (!p) return 0;
+    const active = activeTradeRomeCastles(playerId);
+    const income = active.length;
+    p.lastRomeIncome = income;
+    if (income > 0) {
+      p.romeCoins = (p.romeCoins || 0) + income;
+      addLog(`${active.length} aktif Roma ticaret kalesinden +${income} 🪙 kazandı. Toplam: ${p.romeCoins}.`,PLAYER_NAMES[playerId]);
+      if (!p.isBot) toast(`🪙 Roma ticareti +${income} · Toplam ${p.romeCoins}`);
+    }
+    return income;
+  }
+
+  const coinChip = document.createElement('div');
+  coinChip.className = 'chip';
+  coinChip.id = 'romeCoinChip';
+  coinChip.innerHTML = `Roma Coin <b id="romeCoinValue">0</b>`;
+  const topmetricsCoin = document.querySelector('.topmetrics');
+  if (topmetricsCoin) topmetricsCoin.insertBefore(coinChip,topmetricsCoin.children[3] || null);
+  const romeCoinValueEl = coinChip.querySelector('#romeCoinValue');
+
+  function renderRomeCoinUI() {
+    const p = currentPlayer();
+    if (romeCoinValueEl) romeCoinValueEl.textContent = p?.romeCoins || 0;
+    const rows = [...playersEl.querySelectorAll('.playerRow')];
+    rows.forEach((row,index) => {
+      let badge = row.querySelector('.romeCoinPlayerStat');
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.className = 'romeCoinPlayerStat';
+        badge.style.cssText = 'margin-top:5px;color:#e7c675;font-size:10px';
+        row.appendChild(badge);
+      }
+      const player = game.players[index];
+      const active = player ? activeTradeRomeCastles(player.id).length : 0;
+      badge.textContent = `🪙 ${player?.romeCoins || 0}${active ? ` · gelir +${active}/tur` : ''}`;
+    });
+  }
+
+  const baseCoinRenderPlayers = renderPlayers;
+  renderPlayers = function(...args) {
+    const result = baseCoinRenderPlayers.apply(this,args);
+    renderRomeCoinUI();
+    return result;
+  };
+
+  const baseCoinRenderTop = renderTop;
+  renderTop = function(...args) {
+    const result = baseCoinRenderTop.apply(this,args);
+    renderRomeCoinUI();
+    return result;
+  };
+
+  // Income is collected once, at the beginning of that player's turn.
+  const baseCoinStartTurn = startTurn;
+  startTurn = function(playerId,...rest) {
+    const result = baseCoinStartTurn.call(this,playerId,...rest);
+    awardRomeCoinIncome(playerId);
+    renderAll();
+    return result;
+  };
