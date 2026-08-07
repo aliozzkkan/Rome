@@ -1,0 +1,302 @@
+
+  // --- iPad / touch army movement planner ---
+  let touchArmyPlan = null;
+  let touchArmyPress = null;
+  let lastTouchArmyTap = { id: null, time: 0 };
+
+  const touchArmyStyle = document.createElement('style');
+  touchArmyStyle.textContent = `
+    #touchArmyPanel {
+      position: fixed;
+      z-index: 160;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(560px, calc(100vw - 24px));
+      display: none;
+      padding: 12px;
+      border: 1px solid rgba(228,204,148,.45);
+      border-radius: 16px;
+      background: rgba(13,17,21,.94);
+      color: #f3efe6;
+      box-shadow: 0 14px 44px rgba(0,0,0,.4);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #touchArmyPanel.show { display: block; }
+    #touchArmyPanel .tap-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+    #touchArmyPanel .tap-title { font-size:12px; letter-spacing:.11em; color:#e4cc94; font-weight:800; }
+    #touchArmyPanel .tap-route { font-size:13px; color:#f3efe6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #touchArmyPanel .tap-controls { display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center; }
+    #touchArmyPanel .tap-stepper { display:flex; align-items:center; gap:8px; }
+    #touchArmyPanel button { min-height:42px; border-radius:11px; border:1px solid rgba(255,255,255,.16); background:#202830; color:#f3efe6; padding:0 13px; font:inherit; font-weight:700; }
+    #touchArmyPanel button:disabled { opacity:.35; }
+    #touchArmyPanel button.tap-primary { background:#b99754; color:#111; border-color:#d5ba7d; }
+    #touchArmyPanel .tap-count { min-width:42px; text-align:center; font-size:20px; font-weight:800; }
+    #touchArmyPanel .tap-target { min-width:0; font-size:12px; color:#aeb8c1; line-height:1.35; }
+    #touchArmyPanel .tap-target strong { color:#f3efe6; }
+    #touchArmyPanel .tap-actions { display:flex; gap:8px; justify-content:flex-end; }
+    @media (max-width: 620px) {
+      #touchArmyPanel .tap-controls { grid-template-columns:1fr; }
+      #touchArmyPanel .tap-actions { justify-content:stretch; }
+      #touchArmyPanel .tap-actions button { flex:1; }
+    }
+  `;
+  document.head.appendChild(touchArmyStyle);
+
+  const touchArmyPanel = document.createElement('section');
+  touchArmyPanel.id = 'touchArmyPanel';
+  touchArmyPanel.setAttribute('aria-live', 'polite');
+  document.body.appendChild(touchArmyPanel);
+
+  function positionTouchArmyPanel() {
+    if (!touchArmyPanel.classList.contains('show')) return;
+    const handRect = handEl?.getBoundingClientRect?.();
+    const safeBottom = handRect && handRect.top > 0 && handRect.top < window.innerHeight
+      ? Math.max(12, window.innerHeight - handRect.top + 10)
+      : 16;
+    touchArmyPanel.style.bottom = `${safeBottom}px`;
+  }
+
+  function hideTouchArmyPlanner() {
+    touchArmyPlan = null;
+    touchArmyPanel.classList.remove('show');
+    touchArmyPanel.innerHTML = '';
+  }
+
+  function targetIsHostileForCurrentPlayer(targetId) {
+    const tg = troopGroup(targetId);
+    const node = nodes.get(targetId);
+    return !!((tg && tg.owner !== game.current) || (node && node.owner !== 0 && node.owner !== game.current) || (node && node.owner === 0 && troopTotal(targetId) > 0));
+  }
+
+  function maxFriendlyArrival(sourceId, targetId) {
+    const sg = troopGroup(sourceId);
+    if (!sg) return 0;
+    const targetNode = nodes.get(targetId);
+    if (!targetNode || targetIsHostileForCurrentPlayer(targetId)) return sg.ready;
+    return Math.min(sg.ready, freeCapacity(targetId, game.current));
+  }
+
+  function renderTouchArmyPlanner() {
+    if (!touchArmyPlan) { hideTouchArmyPlanner(); return; }
+    const sg = troopGroup(touchArmyPlan.sourceId);
+    if (!sg || sg.owner !== game.current || sg.ready < 1) { hideTouchArmyPlanner(); return; }
+
+    const hardMax = sg.ready;
+    let max = hardMax;
+    if (touchArmyPlan.targetId && !targetIsHostileForCurrentPlayer(touchArmyPlan.targetId)) {
+      max = Math.max(0, maxFriendlyArrival(touchArmyPlan.sourceId, touchArmyPlan.targetId));
+    }
+    if (max < 1) touchArmyPlan.count = 0;
+    else touchArmyPlan.count = Math.min(Math.max(1, touchArmyPlan.count || 1), max);
+
+    const targetText = touchArmyPlan.targetId
+      ? `<strong>${locationLabel(touchArmyPlan.targetId)}</strong>${targetIsHostileForCurrentPlayer(touchArmyPlan.targetId) ? ' · ⚔️ saldırı' : ' · hareket'}`
+      : '<strong>Hedef seç</strong> · parlayan komşu karelerden birine dokun';
+
+    touchArmyPanel.innerHTML = `
+      <div class="tap-head">
+        <div>
+          <div class="tap-title">ORDU HAREKETİ</div>
+          <div class="tap-route">${locationLabel(touchArmyPlan.sourceId)} · ${sg.ready} hazır lejyon</div>
+        </div>
+        <button id="tapArmyClose" aria-label="İptal">✕</button>
+      </div>
+      <div class="tap-controls">
+        <div class="tap-stepper">
+          <button id="tapArmyMinus" aria-label="Bir azalt">−</button>
+          <span class="tap-count">${touchArmyPlan.count}</span>
+          <button id="tapArmyPlus" aria-label="Bir artır">+</button>
+          <button id="tapArmyAll">Tümü</button>
+        </div>
+        <div class="tap-target">${targetText}</div>
+        <div class="tap-actions">
+          <button id="tapArmyCancel">İptal</button>
+          <button id="tapArmySend" class="tap-primary" ${!touchArmyPlan.targetId || touchArmyPlan.count < 1 ? 'disabled' : ''}>${touchArmyPlan.targetId && targetIsHostileForCurrentPlayer(touchArmyPlan.targetId) ? 'Saldır' : 'Gönder'}</button>
+        </div>
+      </div>
+    `;
+    touchArmyPanel.classList.add('show');
+    requestAnimationFrame(positionTouchArmyPanel);
+
+    document.getElementById('tapArmyClose').addEventListener('click', cancelTouchArmyPlanner);
+    document.getElementById('tapArmyCancel').addEventListener('click', cancelTouchArmyPlanner);
+    document.getElementById('tapArmyMinus').addEventListener('click', () => {
+      if (touchArmyPlan.count > 1) touchArmyPlan.count -= 1;
+      renderTouchArmyPlanner();
+    });
+    document.getElementById('tapArmyPlus').addEventListener('click', () => {
+      if (touchArmyPlan.count < max) touchArmyPlan.count += 1;
+      renderTouchArmyPlanner();
+    });
+    document.getElementById('tapArmyAll').addEventListener('click', () => {
+      touchArmyPlan.count = max;
+      renderTouchArmyPlanner();
+    });
+    document.getElementById('tapArmySend').addEventListener('click', sendTouchArmyPlan);
+  }
+
+  function cancelTouchArmyPlanner() {
+    hideTouchArmyPlanner();
+    resetInteractionMode();
+  }
+
+  function openTouchArmyPlanner(sourceId) {
+    if (game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return;
+    const sg = troopGroup(sourceId);
+    if (!sg || sg.owner !== game.current || sg.ready < 1) {
+      toast('Burada bu tur hareket edebilecek lejyonun yok.', false);
+      return;
+    }
+    const reachable = adjacentLocations(sourceId);
+    if (!reachable.size) {
+      toast('Bu birlik tamamlanmış bir yola bağlı değil. Önce yolu Kale veya Roma ile tamamla.', false);
+      return;
+    }
+    game.selectedCardId = null;
+    game.selectedLocationId = sourceId;
+    game.selectedNodeId = nodes.has(sourceId) ? sourceId : null;
+    game.reachable = reachable;
+    game.mode = 'move-target';
+    touchArmyPlan = { sourceId, targetId: null, count: 1 };
+    setModeText(`ORDU: ${sg.ready} hazır lejyon var. Sayıyı seç, parlayan komşu kareye dokun, sonra Gönder.`);
+    renderAll();
+    renderTouchArmyPlanner();
+  }
+
+  function selectTouchArmyTarget(targetId) {
+    if (!touchArmyPlan) return;
+    if (!game.reachable.has(targetId)) {
+      toast('Yalnız tamamlanmış yol üzerindeki parlayan komşu karta gidebilirsin.', false);
+      return;
+    }
+    touchArmyPlan.targetId = targetId;
+    const allowed = targetIsHostileForCurrentPlayer(targetId)
+      ? troopGroup(touchArmyPlan.sourceId).ready
+      : maxFriendlyArrival(touchArmyPlan.sourceId, targetId);
+    if (allowed < 1) {
+      touchArmyPlan.targetId = null;
+      toast(`${locationLabel(targetId)} dolu. Kaleyi yükselt veya asker çıkar.`, false);
+      renderTouchArmyPlanner();
+      return;
+    }
+    touchArmyPlan.count = Math.min(touchArmyPlan.count, allowed);
+    setModeText(`${locationLabel(targetId)} hedef seçildi. ${touchArmyPlan.count} lejyon göndermek için Gönder'e bas.`);
+    renderAll();
+    renderTouchArmyPlanner();
+  }
+
+  function openTouchBattleConfirm(sourceId, targetId, committed) {
+    const tg = troopGroup(targetId);
+    const defenderOwner = tg?.owner || nodes.get(targetId)?.owner || 0;
+    const node = nodes.get(targetId);
+    const defBonus = node ? defenseBonus(node) : 0;
+    const atkT = supportCount(game.current, 'tactic');
+    const atkS = node && (node.type === 'fort' || node.type === 'rome') ? supportCount(game.current, 'siege') : 0;
+    const defT = defenderOwner ? supportCount(defenderOwner, 'tactic') : 0;
+    const defS = defenderOwner ? supportCount(defenderOwner, 'shield') : 0;
+    modalEl.innerHTML = `
+      <h3>⚔️ ${committed} Lejyon ile saldır</h3>
+      <p>${locationLabel(sourceId)} → ${locationLabel(targetId)}. Seçtiğin birlik sayısı sabit; istersen bir destek kartı seç.</p>
+      <div class="modalRow"><span>Saldıran</span><strong>${committed} lejyon</strong></div>
+      <div class="modalRow"><label for="atkSupport">Saldırı desteği</label><select id="atkSupport" style="max-width:250px"><option value="none">Yok</option>${atkT ? `<option value="tactic">🦅 Taktik +2 (${atkT})</option>` : ''}${atkS ? `<option value="siege">🧨 Kuşatma +3 (${atkS})</option>` : ''}</select></div>
+      <div class="modalRow"><label for="defSupport">Savunma desteği</label><select id="defSupport" style="max-width:250px"><option value="none">Yok</option>${defT ? `<option value="tactic">🦅 Taktik +2 (${defT})</option>` : ''}${defS ? `<option value="shield">🛡️ Kalkan +3 (${defS})</option>` : ''}</select></div>
+      <div class="modalRow"><span>Savunan</span><strong>${tg ? tg.ready + tg.spent : 0} lejyon + ${defBonus} savunma</strong></div>
+      <div class="modalActions"><button id="modalCancel">Vazgeç</button><button id="modalConfirm" class="primary">Saldırıyı Gönder</button></div>
+    `;
+    modalShade.classList.add('show');
+    document.getElementById('modalCancel').addEventListener('click', () => {
+      closeModal();
+      openTouchArmyPlanner(sourceId);
+      touchArmyPlan.count = Math.min(committed, troopGroup(sourceId)?.ready || 1);
+      touchArmyPlan.targetId = targetId;
+      renderTouchArmyPlanner();
+    });
+    document.getElementById('modalConfirm').addEventListener('click', () => {
+      resolveBattle(sourceId, targetId, committed, document.getElementById('atkSupport').value, document.getElementById('defSupport').value);
+      closeModal();
+      hideTouchArmyPlanner();
+      resetInteractionMode();
+    });
+  }
+
+  function sendTouchArmyPlan() {
+    if (!touchArmyPlan?.targetId) return;
+    const { sourceId, targetId, count } = touchArmyPlan;
+    const sg = troopGroup(sourceId);
+    if (!sg || sg.owner !== game.current || sg.ready < count) {
+      toast('Birlik durumu değişti; yeniden seç.', false);
+      cancelTouchArmyPlanner();
+      return;
+    }
+    if (!adjacentLocations(sourceId).has(targetId)) {
+      toast('Bu hedef artık bağlı değil.', false);
+      cancelTouchArmyPlanner();
+      return;
+    }
+    if (targetIsHostileForCurrentPlayer(targetId)) {
+      hideTouchArmyPlanner();
+      openTouchBattleConfirm(sourceId, targetId, count);
+      return;
+    }
+    moveFriendlyTroops(sourceId, targetId, count);
+    hideTouchArmyPlanner();
+    resetInteractionMode();
+  }
+
+  // Hide the touch planner whenever the normal interaction state is reset.
+  const baseResetInteractionMode = resetInteractionMode;
+  resetInteractionMode = function(...args) {
+    hideTouchArmyPlanner();
+    return baseResetInteractionMode.apply(this, args);
+  };
+
+  window.addEventListener('resize', positionTouchArmyPanel);
+
+  // Capture touch gestures on troops so the old drag-to-move handler does not fight iPad taps.
+  renderer.domElement.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' || game.gameOver || game.phase !== 'play' || currentPlayer().isBot) return;
+    const loc = locationUnderPointer(e);
+    const g = loc ? troopGroup(loc.id) : null;
+    const ownMovable = !!(loc && g && g.owner === game.current && g.ready > 0);
+    const plannedTarget = !!(touchArmyPlan && loc && (game.reachable.has(loc.id) || loc.id === touchArmyPlan.sourceId));
+    if (!ownMovable && !plannedTarget) return;
+    touchArmyPress = { x:e.clientX, y:e.clientY, id:loc?.id || null, time:performance.now() };
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, { capture:true, passive:false });
+
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (e.pointerType !== 'touch' || !touchArmyPress) return;
+    const press = touchArmyPress;
+    touchArmyPress = null;
+    const moved = Math.hypot(e.clientX - press.x, e.clientY - press.y);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (moved > 16) return;
+    const loc = locationUnderPointer(e);
+    if (!loc) return;
+
+    if (touchArmyPlan) {
+      if (loc.id === touchArmyPlan.sourceId) {
+        toast('Kaynak birlik seçili. Şimdi parlayan hedef kareye dokun.', true);
+        return;
+      }
+      selectTouchArmyTarget(loc.id);
+      return;
+    }
+
+    const g = troopGroup(loc.id);
+    if (!g || g.owner !== game.current || g.ready < 1) return;
+    const now = performance.now();
+    const isDouble = lastTouchArmyTap.id === loc.id && now - lastTouchArmyTap.time <= 460;
+    lastTouchArmyTap = { id:loc.id, time:now };
+    if (isDouble) {
+      lastTouchArmyTap = { id:null, time:0 };
+      openTouchArmyPlanner(loc.id);
+    } else {
+      toast(`${g.ready} hazır lejyon. Birlikleri açmak için aynı kareye tekrar dokun.`, true);
+    }
+  }, { capture:true, passive:false });
