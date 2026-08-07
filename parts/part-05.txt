@@ -1,0 +1,352 @@
+tn?.addEventListener('click', () => {
+      const c = drawCardForPlayer(game.current);
+      if (c) addLog(`${CARD_INFO[c.type].label} kartını ana desteden aldı.`, PLAYER_NAMES[game.current]);
+      renderAll();
+      beginRefillPhase();
+    });
+    const choices = document.getElementById('discardChoices');
+    if (!prev.discard.length) choices.innerHTML = '<div style="grid-column:1/-1;color:var(--muted);font-size:11px;padding:8px 0">Önceki oyuncunun açık ıskartasında kart yok.</div>';
+    for (const c of prev.discard) {
+      const info = CARD_INFO[c.type];
+      const b = document.createElement('button');
+      b.innerHTML = `${info.icon} <strong>${info.label}</strong>`;
+      b.addEventListener('click', () => takePreviousDiscard(c.id));
+      choices.appendChild(b);
+    }
+  }
+
+  function takePreviousDiscard(cardId) {
+    const prev = playerById(previousPlayerId());
+    const idx = prev.discard.findIndex(c => c.id === cardId);
+    if (idx < 0 || currentPlayer().hand.length >= 7) return;
+    const [c] = prev.discard.splice(idx,1);
+    currentPlayer().hand.push(c);
+    addLog(`${CARD_INFO[c.type].label} kartını önceki oyuncunun ıskartasından aldı.`, PLAYER_NAMES[game.current]);
+    renderAll();
+    beginRefillPhase();
+  }
+
+  function discardAndFinishTurn(cardId) {
+    if (game.phase !== 'discard') return;
+    const p = currentPlayer();
+    const idx = p.hand.findIndex(c => c.id === cardId);
+    if (idx < 0) return;
+    const [c] = p.hand.splice(idx,1);
+    p.discard.push(c);
+    addLog(`${CARD_INFO[c.type].label} kartını açık ıskartaya attı ve turunu bitirdi.`, PLAYER_NAMES[game.current]);
+    finalizeTurn();
+  }
+
+  function finalizeTurn() {
+    closeModal();
+    clearPreview();
+    const endingPlayer = game.current;
+    const next = endingPlayer === 4 ? 1 : endingPlayer + 1;
+    if (endingPlayer === 4) game.round += 1;
+    if (game.finalRoundActive && next === game.finalRoundOrigin) {
+      finishGame();
+      return;
+    }
+    startTurn(next);
+  }
+
+  function finishGame() {
+    game.gameOver = true;
+    resetInteractionMode();
+    const rome = getRome();
+    const winner = rome.owner;
+    modalShade.classList.add('show');
+    modalEl.innerHTML = winner ? `
+      <div id="gameOver"><div class="crown">👑</div><h3>${PLAYER_NAMES[winner]} kazandı</h3><p>Deste bitti ve final turu tamamlandı. Roma ${PLAYER_NAMES[winner]} kontrolünde kaldı.</p><div class="modalActions" style="justify-content:center"><button id="newGameModal" class="primary">Yeni Oyun</button></div></div>
+    ` : `
+      <div id="gameOver"><div class="crown">🏛️</div><h3>Roma tarafsız kaldı</h3><p>Deste bitti ancak hiçbir oyuncu Roma’yı ele geçiremedi. Bu prototipte kazanan yok.</p><div class="modalActions" style="justify-content:center"><button id="newGameModal" class="primary">Yeni Oyun</button></div></div>
+    `;
+    document.getElementById('newGameModal').addEventListener('click', () => { closeModal(); resetGame(); });
+    renderAll();
+  }
+
+  function seededShuffle(arr) {
+    for (let i=arr.length-1;i>0;i--) {
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i],arr[j]] = [arr[j],arr[i]];
+    }
+    return arr;
+  }
+
+  function buildDeckAndHands() {
+    game.players = [1,2,3,4].map(id => ({ id, hand: [], discard: [], isBot: id !== HUMAN_PLAYER_ID }));
+    const deck = [];
+    for (let i=0;i<25;i++) deck.push(card('road'));
+    for (let i=0;i<20;i++) deck.push(card('fort'));
+    for (let i=0;i<25;i++) deck.push(card('legion'));
+    for (let i=0;i<8;i++) deck.push(card('reinforcement'));
+    for (let i=0;i<8;i++) deck.push(card('tactic'));
+    for (let i=0;i<7;i++) deck.push(card('siege'));
+    for (let i=0;i<7;i++) deck.push(card('shield'));
+    if (deck.length !== TOTAL_CARDS) throw new Error(`Deste ${TOTAL_CARDS} kart olmalı, şu an ${deck.length}`);
+    game.deck = seededShuffle(deck);
+    game.spentPile = [];
+    for (const p of game.players) {
+      for (let i=0;i<7;i++) p.hand.push(game.deck.pop());
+    }
+  }
+
+  function clearBoardState() {
+    clearPreview();
+    for (const r of roadPieces.values()) scene.remove(r.group);
+    for (const n of nodes.values()) for (const g of n.groups) scene.remove(g);
+    for (const visual of troopVisuals.values()) { scene.remove(visual); disposeObject3D(visual); }
+    troopVisuals.clear();
+    for (const a of troopAnimations) { scene.remove(a.visual); disposeObject3D(a.visual); }
+    troopAnimations.length = 0;
+    roadPieces.clear(); nodes.clear(); cellMap.clear(); troopGroups.clear(); sceneInteractive.length = 0;
+    nextRoadId = 1; nextFortId = 1;
+  }
+
+  function setupBoard() {
+    createNode('rome','rome',0,0,[{gx:0,gz:0},{gx:1,gz:0},{gx:0,gz:1},{gx:1,gz:1}],true);
+    createNode('home-1','home',1,0,[{gx:0,gz:-5}],true);
+    createNode('home-2','home',2,0,[{gx:6,gz:0}],true);
+    createNode('home-3','home',3,0,[{gx:1,gz:6}],true);
+    createNode('home-4','home',4,0,[{gx:-5,gz:1}],true);
+
+    setTroops('rome',0,4,0);
+    for (let i=1;i<=4;i++) setTroops(`home-${i}`,i,3,0);
+    syncAllTroopVisuals();
+  }
+
+  function resetGame() {
+    clearBoardState();
+    logs.length = 0;
+    nextCardId = 1;
+    game.current = 1;
+    game.round = 1;
+    game.turnSerial = 0;
+    game.phase = 'play';
+    game.selectedCardId = null;
+    game.selectedNodeId = null;
+    game.selectedLocationId = null;
+    game.reachable = new Set();
+    game.mode = 'idle';
+    game.finalRoundActive = false;
+    game.finalRoundOrigin = null;
+    game.gameOver = false;
+    game.cardsPlayedThisTurn = 0;
+    game.botBusy = false;
+    buildDeckAndHands();
+    setupBoard();
+    addLog('Kural testi: 25 Yol, 20 Kale, 25 Lejyon ve mevcut özel kartlar. Kale kartı aynı kalede sınırsız level artırır: her level +1 savunma/+3 kapasite. Asker yalnız iki ucu Kale/Ana Kale/Roma ile tamamlanmış yol segmentlerinde hareket eder.', 'OYUN BAŞLADI');
+    startTurn(1);
+  }
+
+  function pointerToNDC(e) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  }
+
+  function worldUnderPointer(e) {
+    pointerToNDC(e);
+    raycaster.setFromCamera(pointer,camera);
+    const hits = raycaster.intersectObject(ground,false);
+    return hits.length ? hits[0].point : null;
+  }
+
+  function nodeUnderPointer(e) {
+    const loc = locationUnderPointer(e);
+    return loc?.kind === 'node' ? loc.object : null;
+  }
+
+  function locationUnderPointer(e) {
+    pointerToNDC(e);
+    raycaster.setFromCamera(pointer,camera);
+    const hits = raycaster.intersectObjects(sceneInteractive,true);
+    for (const hit of hits) {
+      const nid = hit.object.userData.nodeId;
+      if (nid && nodes.has(nid)) return { kind:'node', id:nid, object:nodes.get(nid) };
+      const rid = hit.object.userData.roadId;
+      if (rid && roadPieces.has(rid)) return { kind:'road', id:rid, object:roadPieces.get(rid) };
+    }
+    return null;
+  }
+
+  function updatePlacementPreview(e) {
+    if (!game.selectedCardId || game.gameOver || game.phase !== 'play') { clearPreview(); return; }
+    const c = currentPlayer().hand.find(x => x.id === game.selectedCardId);
+    if (!c || (c.type !== 'road' && c.type !== 'fort')) { clearPreview(); return; }
+    const p = worldUnderPointer(e);
+    if (!p) { clearPreview(); return; }
+    const cand = nearestPlacementCandidate(p.x,p.z,c.type,game.current);
+    showPreview(cand,c.type);
+  }
+
+
+  deckZone.addEventListener('click', humanDrawFromDeck);
+  handEl.addEventListener('dragover', e => { if (draggedDiscardCardId && game.phase === 'refill') e.preventDefault(); });
+  handEl.addEventListener('drop', e => {
+    if (!draggedDiscardCardId || game.phase !== 'refill') return;
+    e.preventDefault();
+    takePreviousDiscard(draggedDiscardCardId);
+    draggedDiscardCardId = null;
+  });
+
+  turnDiscardZone.addEventListener('dragover', e => {
+    if (draggedHandCardId && !currentPlayer().isBot && (game.phase === 'play' || game.phase === 'discard')) {
+      e.preventDefault(); turnDiscardZone.classList.add('good');
+    }
+  });
+  turnDiscardZone.addEventListener('dragleave', () => turnDiscardZone.classList.remove('good'));
+  turnDiscardZone.addEventListener('drop', e => {
+    turnDiscardZone.classList.remove('good');
+    if (!draggedHandCardId || currentPlayer().isBot || (game.phase !== 'play' && game.phase !== 'discard')) return;
+    e.preventDefault();
+    if (game.phase === 'play') game.phase = 'discard';
+    discardAndFinishTurn(draggedHandCardId);
+    draggedHandCardId = null;
+  });
+
+  renderer.domElement.addEventListener('dragover', e => {
+    if (!draggedHandCardId || currentPlayer().isBot || game.phase !== 'play') return;
+    const c = currentPlayer().hand.find(x => x.id === draggedHandCardId);
+    if (!c) return;
+    if (['road','fort','legion','reinforcement'].includes(c.type)) {
+      e.preventDefault();
+      if (c.type === 'road' || c.type === 'fort') updatePlacementPreview(e);
+    }
+  });
+  renderer.domElement.addEventListener('drop', e => {
+    if (!draggedHandCardId || currentPlayer().isBot || game.phase !== 'play') return;
+    e.preventDefault();
+    const c = currentPlayer().hand.find(x => x.id === draggedHandCardId);
+    if (!c) return;
+    game.selectedCardId = c.id;
+    if (c.type === 'road') {
+      updatePlacementPreview(e);
+      if (hoverCandidate) playRoad(hoverCandidate); else toast('Yol burada mevcut ağa bağlanmıyor.', false);
+    } else if (c.type === 'fort') {
+      updatePlacementPreview(e);
+      if (hoverCandidate) playFort(hoverCandidate); else toast('Kale kartını yol üstüne/ucuna veya kendi kalenin üstüne level için bırak.', false);
+    } else if (c.type === 'legion' || c.type === 'reinforcement') {
+      const loc = locationUnderPointer(e);
+      if (loc?.id !== `home-${game.current}`) { toast('Lejyon ve Takviye kartını kendi Ana Kalene bırak.', false); resetInteractionMode(); return; }
+      if (c.type === 'legion') playLegion(); else playReinforcement();
+    } else {
+      toast('Bu savaş kartı çatışma sırasında kullanılır. Turu bitirmek istersen ıskarta alanına bırak.', false);
+      resetInteractionMode();
+    }
+    draggedHandCardId = null;
+  });
+
+  cardsRefBtn.addEventListener('click', () => referencePanel.classList.toggle('show'));
+  closeRefBtn.addEventListener('click', () => referencePanel.classList.remove('show'));
+  renderReferenceTable();
+
+  renderer.domElement.addEventListener('pointerdown', e => {
+    pointerDown = { x: e.clientX, y: e.clientY, button: e.button };
+    if (e.button === 0 && !game.gameOver && game.phase === 'play' && !currentPlayer().isBot && !game.selectedCardId) {
+      const loc = locationUnderPointer(e);
+      const g = loc ? troopGroup(loc.id) : null;
+      if (loc && g && g.owner === game.current && g.ready > 0) {
+        troopDrag = { sourceId: loc.id, startX:e.clientX, startY:e.clientY, active:false };
+      }
+    }
+  });
+
+  renderer.domElement.addEventListener('pointermove', e => {
+    if (troopDrag && (e.buttons & 1)) {
+      const dist = Math.hypot(e.clientX-troopDrag.startX, e.clientY-troopDrag.startY);
+      if (dist > 7 && !troopDrag.active) {
+        troopDrag.active = true; controls.enabled = false;
+        game.selectedLocationId = troopDrag.sourceId; game.reachable = adjacentLocations(troopDrag.sourceId);
+        setModeText('LEJYON SÜRÜKLE: Yalnız tamamlanmış (parlak) yol segmentindeki komşu karta bırak.'); renderAll();
+      }
+      if (troopDrag.active) return;
+    }
+    if (e.buttons === 0) updatePlacementPreview(e);
+  });
+
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (troopDrag?.active) {
+      const sourceId = troopDrag.sourceId;
+      const loc = locationUnderPointer(e);
+      controls.enabled = true; troopDrag = null; pointerDown = null;
+      if (loc && adjacentLocations(sourceId).has(loc.id)) {
+        const tg = troopGroup(loc.id); const targetNode = nodes.get(loc.id);
+        const hostile = (tg && tg.owner !== game.current) || (targetNode && targetNode.owner && targetNode.owner !== game.current);
+        if (hostile) openBattleModal(sourceId, loc.id); else openMoveModal(sourceId, loc.id);
+      } else { toast('Lejyon yalnız tamamlanmış yol üzerindeki bağlı komşu karta sürüklenebilir.', false); resetInteractionMode(); }
+      return;
+    }
+    troopDrag = null; controls.enabled = true;
+    if (!pointerDown || pointerDown.button !== 0) { pointerDown = null; return; }
+    const moved = Math.hypot(e.clientX-pointerDown.x,e.clientY-pointerDown.y);
+    pointerDown = null;
+    if (moved > 6 || game.gameOver || modalShade.classList.contains('show') || game.phase === 'refill') return;
+
+    const selectedCard = game.selectedCardId ? currentPlayer().hand.find(x => x.id === game.selectedCardId) : null;
+    if (selectedCard?.type === 'road') {
+      updatePlacementPreview(e);
+      if (hoverCandidate) playRoad(hoverCandidate); else toast('Buraya bağlanabilecek geçerli bir düz yol yok.', false);
+      return;
+    }
+    if (selectedCard?.type === 'fort') {
+      updatePlacementPreview(e);
+      if (hoverCandidate) playFort(hoverCandidate); else toast('Kale kartını yol üstüne/ucuna veya kendi kalenin üstüne level için bırak.', false);
+      return;
+    }
+
+    const loc = locationUnderPointer(e);
+    if (game.mode === 'move-source') {
+      if (loc) chooseMoveSource(loc.id); else toast('Üzerinde lejyon bulunan bir yol veya kale seç.', false);
+      return;
+    }
+    if (game.mode === 'move-target') {
+      if (loc) chooseMoveTarget(loc.id); else toast('Komşu hedef kartlardan birini seç.', false);
+      return;
+    }
+
+    game.selectedLocationId = loc?.id || null;
+    game.selectedNodeId = loc?.kind === 'node' ? loc.id : null;
+    renderAll();
+  });
+
+  renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+
+  moveBtn.addEventListener('click', startMoveMode);
+  cancelBtn.addEventListener('click', resetInteractionMode);
+  endTurnBtn.addEventListener('click', endTurn);
+  resetBtn.addEventListener('click', () => {
+    if (confirm('Yeni oyun başlatılsın mı? Mevcut oyun silinecek.')) resetGame();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (game.phase === 'refill') {
+        toast('Önce elini 7 karta tamamla.', false);
+        return;
+      }
+      if (modalShade.classList.contains('show')) closeModal();
+      resetInteractionMode();
+    }
+    if (e.key === 'Enter' && !game.gameOver && !modalShade.classList.contains('show')) endTurn();
+  });
+
+  function resize() {
+    const w = boardEl.clientWidth, h = boardEl.clientHeight;
+    renderer.setSize(w,h,false);
+    camera.aspect = w/h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize',resize);
+  resize();
+
+  resetGame();
+
+  renderer.setAnimationLoop((time) => {
+    controls.update();
+    updateTroopAnimations(time || performance.now());
+    renderer.render(scene,camera);
+  });
+</script>
+</body>
+</html>
